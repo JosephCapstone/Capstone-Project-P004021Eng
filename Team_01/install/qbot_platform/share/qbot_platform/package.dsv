@@ -1,8 +1,0 @@
-source;share/qbot_platform/hook/cmake_prefix_path.ps1
-source;share/qbot_platform/hook/cmake_prefix_path.dsv
-source;share/qbot_platform/hook/cmake_prefix_path.sh
-source;share/qbot_platform/local_setup.bash
-source;share/qbot_platform/local_setup.dsv
-source;share/qbot_platform/local_setup.ps1
-source;share/qbot_platform/local_setup.sh
-source;share/qbot_platform/local_setup.zsh
