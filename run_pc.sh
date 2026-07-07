@@ -2,7 +2,7 @@
 
 # This file is located on the PC in /home/ernie/
 
-# This run script runs the following commands:
+# This script runs the following commands:
 # 1. List's all topics broadcasted from the QBot to confirm connection
 # 2. Runs the RGB camera viewer
 
