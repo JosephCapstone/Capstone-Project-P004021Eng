@@ -2,11 +2,11 @@
 
 # This file is located on the PC in /home/ernie/
 
-# This run script runs the following commands to 
+# This run script runs the following commands:
 # 1. List's all topics broadcasted from the QBot to confirm connection
 # 2. Runs the RGB camera viewer
 
-# To run this script in the VSCode WSL Ubuntu 22.04 bash terminal type ./run_pc.sh
+# To run this script, type "./run_pc.sh" in the VSCode WSL Ubuntu 22.04 bash terminal
 
 ## THINGS TO NOTE ##
 # - THE ONLY WAY THIS CODE WORKS IS IF THE WINDOWS FIREWALL ON THE PRIVATE NETWORK IS TURNED OFF 
