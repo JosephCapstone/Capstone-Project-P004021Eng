@@ -1,6 +1,6 @@
 # QBot Platform
 
-The qbot_platform folder is located in /home/nvidia/ros2/src
+The qbot_platform folder is located on the QBot Platform in /home/nvidia/ros2/src
 
 NOT COMPLETED
 (GOAL OF THIS SECTION IS TO COPY THE ENTIRE FOLDER AND REPLACE THE ONE ALREADY ON THE QBOT)
