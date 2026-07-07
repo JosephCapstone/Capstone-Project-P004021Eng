@@ -98,8 +98,8 @@ int main(int argc, char ** argv)
 
     // parameters that cannot be changed once node is running
     t_uint32 camera_num;    // = 0;
-    t_uint32 frame_width_rgb = 1280;
-	t_uint32 frame_height_rgb = 720;
+    t_uint32 frame_width_rgb = 848;
+	t_uint32 frame_height_rgb = 480;
     t_uint32 frame_width_depth = 1280;
 	t_uint32 frame_height_depth = 720;
 	t_double frame_rate = 30.0;
@@ -138,13 +138,13 @@ int main(int argc, char ** argv)
 
     param_desc.description = "The requested frame width of the RGB stream. Only certain combinations of frame_width_rgb, frame_height_rgb, and frame_rate parameters can be used. Refer to the following Additional constraints for details.";
     param_desc.additional_constraints = "Possible values:\n\t320 x 180 @???\n\t320 x 240 @???\n\t424 x 240 @???\n\t640 x 360 @???\n\t640 x 480 @???\n\t848 x 480 @???\n\t960 x 540 @???\n\t1280 x 720 @???\n\t1920 x 1080 @???";
-    node->declare_parameter("frame_width_rgb", 1280, param_desc);
+    node->declare_parameter("frame_width_rgb", 848, param_desc);
     frame_width_rgb = node->get_parameter("frame_width_rgb").as_int();
     //RCLCPP_INFO(node->get_logger(), "Parameter frame_width_rgb = %d", frame_width_rgb);
 
     param_desc.description = "The requested frame height of the RGB stream. Only certain combinations of frame_width_rgb, frame_height_rgb, and frame_rate parameters can be used. Refer to the following Additional constraints for details.";
     param_desc.additional_constraints = "Possible values:\n\t320 x 180 @???\n\t320 x 240 @???\n\t424 x 240 @???\n\t640 x 360 @???\n\t640 x 480 @???\n\t848 x 480 @???\n\t960 x 540 @???\n\t1280 x 720 @???\n\t1920 x 1080 @???";
-    node->declare_parameter("frame_height_rgb", 720, param_desc);
+    node->declare_parameter("frame_height_rgb", 480, param_desc);
     frame_height_rgb = node->get_parameter("frame_height_rgb").as_int();
     //RCLCPP_INFO(node->get_logger(), "Parameter frame_height_rgb = %d", frame_height_rgb);
 
