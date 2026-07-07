@@ -88,7 +88,7 @@ class CommandPublisher : public rclcpp::Node
                             throttle = 0.5*(0.5+0.5*RT);
                         };
 
-                        steering = 0.8*LLA;
+                        steering = 1*LLA;
                         if (A == 1)
                         {
                             throttle = -throttle;
