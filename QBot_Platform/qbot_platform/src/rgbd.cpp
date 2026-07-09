@@ -98,8 +98,8 @@ int main(int argc, char ** argv)
 
     // parameters that cannot be changed once node is running
     t_uint32 camera_num;    // = 0;
-    t_uint32 frame_width_rgb = 848;
-	t_uint32 frame_height_rgb = 480;
+    t_uint32 frame_width_rgb = 640;
+	t_uint32 frame_height_rgb = 360;
     t_uint32 frame_width_depth = 1280;
 	t_uint32 frame_height_depth = 720;
 	t_double frame_rate = 30.0;

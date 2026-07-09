@@ -47,6 +47,9 @@ t_double force_feedback_gain = 0.0;
 t_game_controller_states data;
 t_boolean is_new;
 
+// Boolean to make LB a toggle
+bool armed = false;
+bool prevLB = false;
 
 class CommandPublisher : public rclcpp::Node
 {
@@ -74,28 +77,36 @@ class CommandPublisher : public rclcpp::Node
                 result = game_controller_poll(gamepad, &data, &is_new);
                 LLA = -1*data.x;
                 RT = data.rz;
+                LT = data.z;
                 A = (t_uint8)(data.buttons & (1 << 0));
                 LB = (t_uint8)((data.buttons & (1 << 4))/16);
-
+                
+                // Makes LB a toggle and not a hold
+                if (LB && !prevLB){
+                    armed = !armed;
+                }
+                prevLB = LB;   
+            
                 // Only enable motion when the QBot is being armed
-                if (LB == 1)
+                if (armed == 1)
                     {
-                        //not moving in reverse
-                        if (RT == 0){
-                            throttle = 0;
+                        //movement actions
+                        if (RT > 0){
+                            throttle = 0.8*(0.5+0.5*RT);
+                        }
+                        else if (LT > 0){
+                            throttle = -0.8*(0.5+0.5*LT);
                         }
                         else{
-                            throttle = 0.5*(0.5+0.5*RT);
-                        };
-
-                        steering = 1*LLA;
+                            throttle = 0;
+                        }
+                        
+                        steering = 2.5*LLA;
+                        
                         if (A == 1)
                         {
-                            throttle = -throttle;
-                            steering = steering;
 
                         };
-
                     }
                 else
                 {
