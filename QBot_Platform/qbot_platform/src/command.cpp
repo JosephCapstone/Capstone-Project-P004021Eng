@@ -96,6 +96,7 @@ class CommandPublisher : public rclcpp::Node
                         }
                         else if (LT > 0){
                             throttle = -0.8*(0.5+0.5*LT);
+                            steering = -2.5*LLA;
                         }
                         else{
                             throttle = 0;
