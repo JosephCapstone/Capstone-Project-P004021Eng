@@ -93,6 +93,7 @@ class CommandPublisher : public rclcpp::Node
                         //movement actions
                         if (RT > 0){
                             throttle = 0.8*(0.5+0.5*RT);
+                            steering = 2.5*LLA;
                         }
                         else if (LT > 0){
                             throttle = -0.8*(0.5+0.5*LT);
@@ -100,13 +101,13 @@ class CommandPublisher : public rclcpp::Node
                         }
                         else{
                             throttle = 0;
+                            steering = 2.5*LLA;
                         }
-                        
-                        steering = 2.5*LLA;
                         
                         if (A == 1)
                         {
-
+                           // throttle = 0;
+                           // steering = 4;
                         };
                     }
                 else
