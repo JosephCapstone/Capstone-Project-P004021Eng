@@ -5,6 +5,7 @@
 #include "quanser/quanser_messages.h"
 #include "quanser/quanser_memory.h"
 #include "std_msgs/msg/header.hpp"
+#include "std_msgs/msg/color_rgba.hpp"
 
 #include "quanser/quanser_hid.h"
 
@@ -60,6 +61,8 @@ class CommandPublisher : public rclcpp::Node
 
 
     command_publisher_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
+    // Creates the publisher that will talk to the qbot_led_strip topic
+    led_publisher_ = this->create_publisher<std_msgs::msg::ColorRGBA>("qbot_led_strip", 10);
     // try to connect to joystick
 	result = game_controller_open(controller_number, buffer_size, deadzone, saturation, auto_center,
                      max_force_feedback_effects, force_feedback_gain, &gamepad);
@@ -81,46 +84,63 @@ class CommandPublisher : public rclcpp::Node
                 A = (t_uint8)(data.buttons & (1 << 0));
                 LB = (t_uint8)((data.buttons & (1 << 4))/16);
                 
+                // Initialises the led variable
+                std_msgs::msg::ColorRGBA led;
+                led.a =1.0;
+                
                 // Makes LB a toggle and not a hold
                 if (LB && !prevLB){
                     armed = !armed;
+
                 }
                 prevLB = LB;   
             
                 // Only enable motion when the QBot is being armed
-                if (armed == 1)
-                    {
-                        //movement actions
-                        if (RT > 0){
-                            throttle = 0.8*(0.5+0.5*RT);
-                            steering = 2.5*LLA;
-                        }
-                        else if (LT > 0){
-                            throttle = -0.8*(0.5+0.5*LT);
-                            steering = -2.5*LLA;
-                        }
-                        else{
-                            throttle = 0;
-                            steering = 2.5*LLA;
-                        }
+                if (armed == 1){
+
+                    // If armed sets led strip to green
+                    led.r = 0.0;
+                    led.g = 1.0;
+                    led.b = 0.0;
+
+                    //movement actions
+                    if (RT > 0){
+                        throttle = 0.8*(0.5+0.5*RT);
+                        steering = 2.5*LLA;
+                    }
+                    else if (LT > 0){
+                        throttle = -0.8*(0.5+0.5*LT);
+                        steering = -2.5*LLA;
+                    }
+                    else{
+                        throttle = 0;
+                        steering = 2.5*LLA;
+                    }
                         
-                        if (A == 1)
-                        {
-                           // throttle = 0;
-                           // steering = 4;
-                        };
+                    if (A == 1){
+                        // throttle = 0;
+                        // steering = 4;
+                    };
                     }
                 else
                 {
                 throttle = 0;
                 steering = 0;
+
+                //If not armed sets led strip to blue
+                led.r = 0.0;
+                led.g = 0.0;
+                led.b = 1.0;
+
                 }
 
                 geometry_msgs::msg::Twist twist;
+                
                 twist.linear.x = throttle;
                 twist.angular.z = steering;
                 this->command_publisher_->publish(twist);
-
+                // Publishes led to qbot_led_strip topic
+                this->led_publisher_->publish(led);
             }
 
 
@@ -139,6 +159,7 @@ class CommandPublisher : public rclcpp::Node
     private:
         rclcpp::TimerBase::SharedPtr timer_;
         rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr command_publisher_;
+        rclcpp::Publisher<std_msgs::msg::ColorRGBA>::SharedPtr led_publisher_;
 
 };
 

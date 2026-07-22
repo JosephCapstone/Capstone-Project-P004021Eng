@@ -161,6 +161,11 @@ public:
         {
             node_running = true;
 
+            send_buffer[1] = 1.0;  // Enable user LED control
+            send_buffer[2] = 0.0;  // Red
+            send_buffer[3] = 0.0;  // Green
+            send_buffer[4] = 1.0;  // Blue
+
             // Create the publishers
             speed_feedback_publisher_ = this->create_publisher<geometry_msgs::msg::TwistStamped>("qbot_speed_feedback", 10, pub_options);
             battery_state_publisher_ = this->create_publisher<sensor_msgs::msg::BatteryState>("qbot_battery", 10, pub_options);
