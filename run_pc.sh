@@ -16,5 +16,5 @@ source /opt/ros/humble/setup.bash
 ros2 daemon start
 ros2 topic list
 
-ros2 run rqt_image_view rqt_image_view
-rqt_graph
+ros2 run rqt_image_view rqt_image_view &
+ros2 run rqt_graph rqt_graph &
