@@ -5,6 +5,7 @@
 # This script runs the following commands:
 # 1. Builds the Ros 2 workspace to compile any update files
 # 2. Runs the QBot launch file
+# 3. Runs the Ouster OS0 LiDAR launch file
 
 # To run this script, type "./run_qbot.sh" in the QBot terminal.
 
@@ -17,3 +18,4 @@ source install/setup.bash
 # echo $ROS_DOMAIN_ID
 
 ros2 launch qbot_platform qbot_platform_manual_drive_launch.py
+ros2 launch ouster_ros sensor.launch.xml sensor_hostname:=os-992123000057.local

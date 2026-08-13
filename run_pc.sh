@@ -5,6 +5,7 @@
 # This script runs the following commands:
 # 1. List's all topics broadcasted from the QBot to confirm connection
 # 2. Runs the RGB camera viewer
+# 3. Runs the rqt_graph viewer
 
 # To run this script, type "./run_pc.sh" in the VSCode WSL Ubuntu 22.04 bash terminal
 

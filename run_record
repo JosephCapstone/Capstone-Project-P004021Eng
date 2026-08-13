@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# This file is located on the QBot in /home/nvidia/
+
+# This script runs the following commands:
+# 1. Start the ROS Bag recording
+
+# To run this script, type "./run_record.sh" in the QBot terminal.
+
+cd ~/ros2/Bags # NEED TO MAKE A NEW FOLDER FOR THIS
+source /opt/ros/humble/setup.bash
+source install/setup.bash ## UNSURE IF THIS FOLDER IS IN THE TEST
+
+read -p 'Recording Name ' BAG_NAME
+read -p 'Press ENTER to start recording...'
+
+ros2 bag record -o "$BAG_NAME" /ouster/points /ouster/imu /ouster/metadata /tf /tf_static /qbot_imu &
+BAG_PID=$!
+
+read -n 1 -p "Press q to stop recording: " KEY
+
+if [ "$KEY" = "q" ]; then
+    kill $BAG_PID
+fi
