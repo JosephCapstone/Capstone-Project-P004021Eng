@@ -105,12 +105,12 @@ class CommandPublisher : public rclcpp::Node
 
                     //movement actions
                     if (RT > 0){
-                        throttle = 0.8*(0.5+0.5*RT);
-                        steering = 2.5*LLA;
+                        throttle = 0.3*(0.5+0.5*RT);
+                        steering = 1.5*LLA;
                     }
                     else if (LT > 0){
-                        throttle = -0.8*(0.5+0.5*LT);
-                        steering = -2.5*LLA;
+                        throttle = -0.3*(0.5+0.5*LT);
+                        steering = -1.5*LLA;
                     }
                     else{
                         throttle = 0;

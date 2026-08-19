@@ -1,0 +1,127 @@
+import sys
+import paramiko
+
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QApplication, 
+    QMainWindow, 
+    QWidget, 
+    QVBoxLayout, 
+    QLabel, 
+    QPushButton, 
+    QHBoxLayout, 
+    QPlainTextEdit, 
+    QFrame
+)
+
+def launch_script(log):
+    ssh=paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    log.appendPlainText("Connecting to D.E.L.T.A...")
+
+    ssh.connect(
+        hostname="192.168.0.157",
+        username="nvidia",
+        password="nvidia",
+        )
+
+    log.appendPlainText("Connected!")
+    log.appendPlainText("Launching D.E.L.T.A...")
+
+    ssh.exec_command("./run_qbot.sh")
+
+    log.appendPlainText("D.E.L.T.A Launched!")
+
+    ssh.close()
+
+def stop_script(log):
+    ssh=paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+    ssh.connect(
+        hostname="192.168.0.157",
+        username="nvidia",
+        password="nvidia",
+        )
+        
+    ssh.exec_command("pkill -INT -f run_qbot.sh")
+
+    ssh.close()
+
+class DeltaUI(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("D.E.L.T.A")
+        self.resize(1200, 800)
+
+        widget = QWidget()
+
+        # Title
+        title = QLabel("D.E.L.T.A")
+        title.setStyleSheet("""
+            font-size: 32px;
+            font-weight: bold;
+        """)
+
+        # Camera
+        camera_frame = QFrame()
+        camera_frame.setFrameShape(QFrame.Shape.Box)
+
+        camera_layout = QVBoxLayout(camera_frame)
+
+        camera_label = QLabel("CAMERA FEED")
+        camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        camera_layout.addWidget(camera_label)
+
+        # Controls
+        start_button = QPushButton("Start")
+        stop_button = QPushButton("Stop")
+
+        start_button.clicked.connect(lambda: launch_script(log))
+        stop_button.clicked.connect(lambda: stop_script(log))
+
+        control_layout = QVBoxLayout()
+
+        control_layout.addWidget(start_button)
+        control_layout.addWidget(stop_button)
+        control_layout.addStretch()
+
+        # Log
+        log = QPlainTextEdit()
+        log.setReadOnly(True)
+
+        log.setStyleSheet("""
+            border-radius: 5px;
+            background-color: grey;
+        """)
+
+        log.appendPlainText("D.E.L.T.A GUI started")
+        log.appendPlainText("Alicia, Dylan, Jayson, Mahmut, Aaron, Joseph, Callum, Jordan, Tom, Elias, Codi, Lucas")
+
+        # Layout
+        layout = QVBoxLayout(widget)
+
+        self.setCentralWidget(widget)
+        layout.addWidget(title)
+
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(camera_frame)
+        top_layout.addLayout(control_layout)
+
+        top_layout.setStretch(0,3)
+        top_layout.setStretch(1,1)
+
+        layout.addLayout(top_layout)
+
+        layout.addWidget(log)
+
+app = QApplication(sys.argv)
+
+window = DeltaUI()
+window.show()
+
+sys.exit(app.exec())
