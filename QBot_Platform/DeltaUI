@@ -1,7 +1,6 @@
 import sys
 import paramiko
 
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, 
@@ -12,7 +11,8 @@ from PySide6.QtWidgets import (
     QPushButton, 
     QHBoxLayout, 
     QPlainTextEdit, 
-    QFrame
+    QFrame,
+    QLineEdit
 )
 
 def launch_script(log):
@@ -34,7 +34,6 @@ def launch_script(log):
 
     log.appendPlainText("D.E.L.T.A Launched!")
 
-    ssh.close()
 
 def stop_script(log):
     ssh=paramiko.SSHClient()
@@ -46,7 +45,37 @@ def stop_script(log):
         password="nvidia",
         )
         
-    ssh.exec_command("pkill -INT -f run_qbot.sh")
+    ssh.exec_command("pkill -INT -f [r]un_qbot.sh")
+
+    ssh.close()
+
+def start_recording(log, self, bag_recording_number):
+    bag_recording_number = self.bag_recording_number.text()
+
+    ssh=paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    ssh.connect(
+        hostname="192.168.0.157",
+        username="nvidia",
+        password="nvidia",
+        )
+
+    ssh.exec_command(f"nohup ~/run_record.sh {bag_recording_number}")
+
+    ssh.close()
+
+def stop_recording(log):
+    ssh=paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    ssh.connect(
+        hostname="192.168.0.157",
+        username="nvidia",
+        password="nvidia",
+        )
+
+    ssh.exec_command("pkill -INT -f [r]un_record.sh")
 
     ssh.close()
 
@@ -89,6 +118,23 @@ class DeltaUI(QMainWindow):
         control_layout.addWidget(start_button)
         control_layout.addWidget(stop_button)
         control_layout.addStretch()
+
+        # Recording
+        bag_recording_number = QLineEdit()
+        bag_recording_number.setPlaceholderText("Recording Number")
+
+        start_recording_button = QPushButton("Start Recording")
+        stop_recording_button = QPushButton("Stop Recording")
+
+        start_recording_button.clicked.connect(lambda: start_recording(log))
+        stop_recording_button.clicked.connect(lambda: stop_recording(log))
+
+        record_layout = QVBoxLayout()
+        record_layout.addWidget(bag_recording_number)
+        record_layout.addWidget(start_recording_button)
+        record_layout.addWidget(stop_recording_button)
+
+        control_layout.addLayout(record_layout)
 
         # Log
         log = QPlainTextEdit()
