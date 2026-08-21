@@ -49,8 +49,8 @@ def stop_script(log):
 
     ssh.close()
 
-def start_recording(log, self, bag_recording_number):
-    bag_recording_number = self.bag_recording_number.text()
+def start_recording(log, bag_recording_number):
+    bag_num = bag_recording_number.text()
 
     ssh=paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -61,9 +61,8 @@ def start_recording(log, self, bag_recording_number):
         password="nvidia",
         )
 
-    ssh.exec_command(f"nohup ~/run_record.sh {bag_recording_number}")
+    ssh.exec_command(f"nohup ~/run_record.sh {bag_num} &")
 
-    ssh.close()
 
 def stop_recording(log):
     ssh=paramiko.SSHClient()
@@ -75,7 +74,7 @@ def stop_recording(log):
         password="nvidia",
         )
 
-    ssh.exec_command("pkill -INT -f [r]un_record.sh")
+    ssh.exec_command("pkill -INT -f '[r]os2 bag record'")
 
     ssh.close()
 
@@ -126,7 +125,7 @@ class DeltaUI(QMainWindow):
         start_recording_button = QPushButton("Start Recording")
         stop_recording_button = QPushButton("Stop Recording")
 
-        start_recording_button.clicked.connect(lambda: start_recording(log))
+        start_recording_button.clicked.connect(lambda: start_recording(log, bag_recording_number))
         stop_recording_button.clicked.connect(lambda: stop_recording(log))
 
         record_layout = QVBoxLayout()
