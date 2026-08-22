@@ -10,9 +10,10 @@ from PySide6.QtWidgets import (
     QLabel, 
     QPushButton, 
     QHBoxLayout, 
-    QPlainTextEdit, 
-    QFrame,
-    QLineEdit
+    QPlainTextEdit,
+    QLineEdit,
+    QGroupBox,
+    QDialog
 )
 
 def launch_script(log):
@@ -33,7 +34,6 @@ def launch_script(log):
     ssh.exec_command("./run_qbot.sh")
 
     log.appendPlainText("D.E.L.T.A Launched!")
-
 
 def stop_script(log):
     ssh=paramiko.SSHClient()
@@ -63,7 +63,6 @@ def start_recording(log, bag_recording_number):
 
     ssh.exec_command(f"nohup ~/run_record.sh {bag_num} &")
 
-
 def stop_recording(log):
     ssh=paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -78,6 +77,71 @@ def stop_recording(log):
 
     ssh.close()
 
+def show_infomation(parent):
+    info_dialog=QDialog(parent)
+    info_dialog.setObjectName("info_dialog")
+    info_dialog.setWindowTitle("About D.E.L.T.A")
+    info_dialog.setFixedSize(450,350)
+
+    info_dialog.setStyleSheet("""
+        QDialog#info_dialog{
+            border: 1px solid #888;
+            border-radius: 5px;
+        }
+    """)
+
+    dialog_layout = QVBoxLayout(info_dialog)
+
+    title_label = QLabel("D.E.L.T.A")
+    title_label.setStyleSheet("""
+            font-size: 24px;
+            font-weight: bold;
+        """)
+
+    description_label = QLabel(
+        "D.E.L.T.A is ..."
+    )
+
+    description_label.setWordWrap(True)
+
+    github_label = QLabel('<a href="https://github.com/JosephCapstone/Capstone-Project-P004021Eng">'
+                          "Github Repository"
+                          "</a>"
+    )
+
+    github_label.setOpenExternalLinks(True)
+
+    credits_label = QLabel(
+        "<b>The Team</b><br>"
+        "Alicia Prinzi<br>"
+        "Big Dylan Jarvis<br>"
+        "Jayson Bilek<br>"
+        "Mahmut Ercan<br>"
+        "Aaron Tuohill<br>"
+        "Joseph Hatton<br>"
+        "Callum Day<br>"
+        "Jordan Fabiyanic<br>"
+        "Tom Soepono<br>"
+        "Elias Bollas<br>"
+        "Codi Barrett<br>"
+        "Lucas Di Guglielmo<br>"
+        "Capstone Supervisor: Dr Amirali Khodadadian Gostar"
+    )
+
+    dialog_layout.addWidget(title_label)
+    dialog_layout.addWidget(description_label)
+    dialog_layout.addWidget(github_label)
+    dialog_layout.addSpacing(10)
+    dialog_layout.addWidget(credits_label)
+    dialog_layout.addStretch()
+
+    close_button = QPushButton("Close")
+    close_button.clicked.connect(info_dialog.accept)
+
+    dialog_layout.addWidget(close_button)
+
+    info_dialog.exec()
+
 class DeltaUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -85,84 +149,119 @@ class DeltaUI(QMainWindow):
         self.setWindowTitle("D.E.L.T.A")
         self.resize(1200, 800)
 
-        widget = QWidget()
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
 
-        # Title
-        title = QLabel("D.E.L.T.A")
-        title.setStyleSheet("""
+        main_layout = QVBoxLayout(central_widget)
+
+        # ---------- Title ----------
+
+        title_layout = QHBoxLayout()
+
+        title_label = QLabel("D.E.L.T.A")
+        title_label.setStyleSheet("""
             font-size: 32px;
             font-weight: bold;
         """)
 
-        # Camera
-        camera_frame = QFrame()
-        camera_frame.setFrameShape(QFrame.Shape.Box)
+        self.info_button = QPushButton("i")
+        self.info_button.setFixedSize(30,30)
+        self.info_button.setToolTip("About D.E.L.T.A")
 
-        camera_layout = QVBoxLayout(camera_frame)
+        self.info_button.clicked.connect(lambda: show_infomation(self))
 
-        camera_label = QLabel("CAMERA FEED")
-        camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+        title_layout.addWidget(self.info_button)
 
-        camera_layout.addWidget(camera_label)
+        main_layout.addLayout(title_layout)
 
-        # Controls
-        start_button = QPushButton("Start")
-        stop_button = QPushButton("Stop")
+        # ---------- Camera ---------- (THIS SECTION SHOULD INCLUDE THE CAMERA FEED ASWELL AS SCAN DATA FOR NAVIGATING DARK AREAS)
 
-        start_button.clicked.connect(lambda: launch_script(log))
-        stop_button.clicked.connect(lambda: stop_script(log))
+        camera_group = QGroupBox("Camera Feed")
+        camera_layout = QVBoxLayout(camera_group)
 
-        control_layout = QVBoxLayout()
+        self.camera_label = QLabel("CAMERA FEED") #Temporary will remove
+        self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        control_layout.addWidget(start_button)
-        control_layout.addWidget(stop_button)
-        control_layout.addStretch()
+        camera_layout.addWidget(self.camera_label)
 
-        # Recording
+        # ---------- Controls ----------
+
+        controls_group = QGroupBox("Controls")
+        controls_layout = QVBoxLayout(controls_group)
+
+        self.start_button = QPushButton("Start")
+        self.stop_button = QPushButton("Stop")
+
+        self.start_button.clicked.connect(lambda: launch_script(self.log))
+        self.stop_button.clicked.connect(lambda: stop_script(self.log))
+
+        controls_layout.addWidget(self.start_button)
+        controls_layout.addWidget(self.stop_button)
+
+        # ---------- Recording ----------
+
+        recording_group = QGroupBox("Recording")
+        recording_layout = QVBoxLayout(recording_group)
+
         bag_recording_number = QLineEdit()
         bag_recording_number.setPlaceholderText("Recording Number")
 
-        start_recording_button = QPushButton("Start Recording")
-        stop_recording_button = QPushButton("Stop Recording")
+        self.start_recording_button = QPushButton("Start Recording")
+        self.stop_recording_button = QPushButton("Stop Recording")
 
-        start_recording_button.clicked.connect(lambda: start_recording(log, bag_recording_number))
-        stop_recording_button.clicked.connect(lambda: stop_recording(log))
+        self.start_recording_button.clicked.connect(lambda: start_recording(self.log, bag_recording_number))
+        self.stop_recording_button.clicked.connect(lambda: stop_recording(self.log))
 
-        record_layout = QVBoxLayout()
-        record_layout.addWidget(bag_recording_number)
-        record_layout.addWidget(start_recording_button)
-        record_layout.addWidget(stop_recording_button)
+        recording_layout.addWidget(bag_recording_number)
+        recording_layout.addWidget(self.start_recording_button)
+        recording_layout.addWidget(self.stop_recording_button)
 
-        control_layout.addLayout(record_layout)
+        # ---------- Log ----------
 
-        # Log
-        log = QPlainTextEdit()
-        log.setReadOnly(True)
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
 
-        log.setStyleSheet("""
-            border-radius: 5px;
-            background-color: grey;
-        """)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
 
-        log.appendPlainText("D.E.L.T.A GUI started")
-        log.appendPlainText("Alicia, Dylan, Jayson, Mahmut, Aaron, Joseph, Callum, Jordan, Tom, Elias, Codi, Lucas")
+        log_layout.addWidget(self.log)
+    
+        self.log.appendPlainText("D.E.L.T.A GUI started")
+        self.log.appendPlainText("Alicia, Dylan, Jayson, Mahmut, Aaron, Joseph, Callum, Jordan, Tom, Elias, Codi, Lucas")
 
-        # Layout
-        layout = QVBoxLayout(widget)
+        # ---------- Layout ----------
 
-        self.setCentralWidget(widget)
-        layout.addWidget(title)
+        control_panel_layout = QVBoxLayout()
+        control_panel_layout.addWidget(controls_group,2)
+        control_panel_layout.addWidget(recording_group,2)
 
         top_layout = QHBoxLayout()
-        top_layout.addWidget(camera_frame)
-        top_layout.addLayout(control_layout)
+        top_layout.addWidget(camera_group,3)
+        top_layout.addLayout(control_panel_layout,1)
 
-        top_layout.setStretch(0,3)
-        top_layout.setStretch(1,1)
+        main_layout.addLayout(top_layout,3)
+        main_layout.addWidget(log_group,1)
 
-        layout.addLayout(top_layout)
+        # ---------- Styling ---------- # MIGHT MOVE TO EACH INDIVIDUAL SECTION AS TO MAKE EVERYTHING UNIQUE IF I NEED TO
 
-        layout.addWidget(log)
+        self.setStyleSheet("""
+        QGroupBox {
+            border-radius: 5px;
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #888;
+        
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            top: 5px;
+            left: 10px;
+            padding: 0 5px;
+        }
+        """)
 
 app = QApplication(sys.argv)
 
