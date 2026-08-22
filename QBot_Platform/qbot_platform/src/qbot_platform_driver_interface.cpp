@@ -326,8 +326,8 @@ private:
         else
         {
             send_buffer[5] = 0.0;   // Disarm the motor
-            send_buffer[7] = 0.0;   // Set speed command to 0
-            send_buffer[8] = 0.0;   // Set speed command to 0
+         //   send_buffer[7] = 0.0;   // Set speed command to 0
+         //   send_buffer[8] = 0.0;   // Set speed command to 0
         }
 
         send_buffer[9] = this->get_clock()->now().seconds();
