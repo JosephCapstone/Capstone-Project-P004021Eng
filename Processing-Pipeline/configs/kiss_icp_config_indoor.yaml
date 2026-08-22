@@ -1,0 +1,45 @@
+# kiss_icp_config_indoor.yaml
+# =============================
+# Tuned KISS-ICP settings for indoor ship-compartment scanning with an
+# Ouster OS0-128, via slam_kiss_icp.py (Stage 1's KISS-ICP backend).
+#
+# This is an ENVIRONMENT/SENSOR profile, not a per-scan setting - reuse
+# it across every compartment capture of a similar scale, rather than
+# regenerating or re-tuning it each time.
+#
+# WHY THIS EXISTS: kiss-icp's own defaults (voxel_size: null, which
+# auto-derives from max_range: 100.0) are tuned for vehicle-scale
+# OUTDOOR odometry (KITTI, MulRan, etc.) - confirmed on real project
+# data that those defaults under-populate an indoor compartment map by
+# roughly 190x (2,628 points vs. 503,189 points on the same real
+# capture, default config vs. this one). If a future run comes out
+# suspiciously sparse, check that --config is actually pointing at this
+# file, not accidentally at a ROS bag's own metadata.yaml (a different,
+# unrelated file that happens to share a common filename) or left
+# unset entirely.
+#
+# To regenerate a fresh starting point instead of editing this file
+# (e.g. after a kiss-icp version upgrade changes available fields):
+#   kiss_icp_dump_config
+# then reapply the two changed values below (voxel_size, max_range).
+
+adaptive_threshold:
+  fixed_threshold: null
+  initial_threshold: 2.0
+  min_motion_th: 0.1
+data:
+  deskew: true
+  max_range: 15.0    # was 100.0 - generous for a compartment interior,
+                      # excludes stray far-range noise irrelevant indoors
+  min_range: 0.0
+mapping:
+  max_points_per_voxel: 20
+  voxel_size: 0.05    # was null (auto-derived from max_range=100.0,
+                       # producing meter-scale cells - far too coarse
+                       # for a room-scale space). 0.05m confirmed to
+                       # produce a plausible, usable point count.
+out_dir: results
+registration:
+  convergence_criterion: 0.0001
+  max_num_iterations: 500
+  max_num_threads: 0
