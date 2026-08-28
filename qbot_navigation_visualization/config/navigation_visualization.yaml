@@ -1,0 +1,23 @@
+navigation_visualizer:
+  ros__parameters:
+    output_frame: base_link
+    # Produced on the Jetson by topic_tools. The full cloud stays off the
+    # Jetson-to-WSL link except when the separate recorder requests it.
+    cloud_topic: /ouster/points_viz
+    scan_topic: /ouster/scan
+    forward_points_topic: /navigation/forward_points
+    local_map_topic: /navigation/local_map
+
+    # Applies only to /navigation/forward_points and the forward-distance gauge.
+    # /navigation/local_map uses the complete 360-degree /ouster/scan.
+    point_cloud_fov_degrees: 90.0
+    min_range: 0.3
+    max_range: 10.0
+    voxel_size: 0.05
+    max_cloud_rate: 5.0
+
+    grid_resolution: 0.10
+    grid_forward_extent: 10.0
+    grid_rear_extent: 10.0
+    grid_lateral_extent: 20.0
+    stale_timeout: 1.0
