@@ -1,7 +1,13 @@
 import sys
 import paramiko
+import cv2
+import rclpy
 
-from PySide6.QtCore import Qt
+from cv_bridge import CvBridge
+from sensor_msgs.msg import Image
+
+from PySide6.QtCore import Qt, QObject, Signal, Slot, QThread
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, 
     QMainWindow, 
@@ -13,7 +19,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QLineEdit,
     QGroupBox,
-    QDialog
+    QDialog,
 )
 
 def launch_script(log):
@@ -142,6 +148,66 @@ def show_infomation(parent):
 
     info_dialog.exec()
 
+class RosCameraSubscriber(QObject):
+    image_received = Signal(QImage)
+
+    def __init__(self):
+        super().__init__()
+
+
+        self.bridge = CvBridge()
+
+        self.node = rclpy.create_node("delta_camera_subscriber")
+
+        self.subscription = self.node.create_subscription(Image, "/topic/name", self.image_callback, 10)
+
+    def image_callback(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg,desired_encoding="bgr8")
+        frame = cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
+
+        height, width, channels = frame.shape
+        bytes_per_line = channels * width
+
+        image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+
+        self.image_received.emit(image)
+
+    def spin(self):
+        rclpy.spin(self.node)
+
+    def stop(self):
+        self.node.destroy_node()
+
+class RosMapSubscriber(QObject):
+    image_received = Signal(QImage)
+
+    def __init__(self):
+        super().__init__()
+
+
+        self.bridge = CvBridge()
+
+        self.node = rclpy.create_node("delta_map_subscriber")
+
+        self.subscription = self.node.create_subscription(Image, "/topic/name", self.image_callback, 10)
+
+    def image_callback(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg,desired_encoding="bgr8")
+        frame = cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
+
+        height, width, channels = frame.shape
+        bytes_per_line = channels * width
+
+        image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+
+        self.image_received.emit(image)
+
+    def spin(self):
+        rclpy.spin(self.node)
+
+    def stop(self):
+        self.node.destroy_node()
+
 class DeltaUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -185,6 +251,37 @@ class DeltaUI(QMainWindow):
         self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         camera_layout.addWidget(self.camera_label)
+
+        # ---------- Camera ----------
+
+        rclpy.init()
+        self.ros_camera = RosCameraSubscriber()
+
+        self.ros_thread = QThread()
+        self.ros_camera.moveToThread(self.ros_thread)
+
+        self.ros_thread.started.connect(self.ros_camera.spin)
+
+        self.ros_camera.image_received.connect(self.update_camera)
+
+        self.ros_thread.start()
+
+        # ---------- Map ----------
+        map_group = QGroupBox("2D Map")
+        map_layout = QVBoxLayout(map_group)
+
+        self.map_label = QLabel("2D Map")
+        self.map_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        map_layout.addWidget(self.map_label)
+
+        self.ros_map = RosMapSubscriber()
+        self.ros_map_thread = QThread()
+        self.ros_map.moveToThread(self.ros_map_thread)
+
+        self.ros_map_thread.started.connect(self.ros_map.spin)
+        self.ros_map.image_received.connect(self.update_map)
+        self.ros_map_thread.start()
 
         # ---------- Controls ----------
 
@@ -239,6 +336,7 @@ class DeltaUI(QMainWindow):
 
         top_layout = QHBoxLayout()
         top_layout.addWidget(camera_group,3)
+        top_layout.addWidget(map_group,3)
         top_layout.addLayout(control_panel_layout,1)
 
         main_layout.addLayout(top_layout,3)
@@ -262,6 +360,24 @@ class DeltaUI(QMainWindow):
             padding: 0 5px;
         }
         """)
+
+    @Slot(QImage)
+    def update_camera(self, image):
+        pixmap = QPixmap.fromImage(image)
+        
+        self.camera_label.setPixmap(pixmap.scaled(self.camera_label.size(),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+
+    def update_map(self, image):
+        pixmap = QPixmap.fromImage(image)
+
+        self.map_label.setPixmap(pixmap.scaled(self.map_label.size(),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+    
+    def closeEvent(self, event):
+        rclpy.shutdown()
+        self.ros_thread.quit()
+        self.ros_thread.wait()
+        event.accept()
+            
 
 app = QApplication(sys.argv)
 
