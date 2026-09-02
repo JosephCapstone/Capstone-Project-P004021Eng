@@ -195,6 +195,7 @@ class DeltaBackend:
         self._monitor_thread: Optional[threading.Thread] = None
         self._worker_start_attempt = 0.0
         self._jetson_poll_time = 0.0
+        self._jetson_poll_in_flight = False
         self._qbot_requested_at = 0.0
         self._qbot_stop_requested_at = 0.0
         self._recording_requested_at = 0.0
@@ -286,9 +287,29 @@ class DeltaBackend:
                     self._start_worker()
 
             if time.monotonic() - self._jetson_poll_time >= 3.0:
-                self._jetson_poll_time = time.monotonic()
-                self._poll_jetson()
+                self._schedule_jetson_poll()
             self._stop_event.wait(0.5)
+
+    def _schedule_jetson_poll(self) -> None:
+        with self._lock:
+            if self._jetson_poll_in_flight:
+                return
+            self._jetson_poll_in_flight = True
+            self._jetson_poll_time = time.monotonic()
+        try:
+            self._executor.submit(self._poll_jetson_async)
+        except RuntimeError:
+            with self._lock:
+                self._jetson_poll_in_flight = False
+            raise
+
+    def _poll_jetson_async(self) -> None:
+        try:
+            self._poll_jetson()
+        finally:
+            with self._lock:
+                self._jetson_poll_in_flight = False
+                self._jetson_poll_time = time.monotonic()
 
     def _set_worker_unavailable(self, error: str) -> None:
         with self._lock:

@@ -7,11 +7,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qbot_navigation_visualization.mapping_core import (  # noqa: E402
     MapGeometry,
+    mapping_scan_is_fresh,
     render_occupancy_ppm,
     save_trinary_map,
     validate_map_name,
     validate_saved_map,
 )
+
+
+def test_mapping_scan_freshness_accepts_either_scan_source():
+    assert mapping_scan_is_fresh({"/ouster/scan": 9.2}, now=10.0)
+    assert mapping_scan_is_fresh(
+        {
+            "/ouster/scan": 5.0,
+            "/navigation/reconstructed_scan": 9.5,
+        },
+        now=10.0,
+    )
+
+
+def test_mapping_scan_freshness_rejects_missing_or_stale_input():
+    assert not mapping_scan_is_fresh({}, now=10.0)
+    assert not mapping_scan_is_fresh({"/ouster/scan": 8.9}, now=10.0)
 
 
 def test_validate_map_name_accepts_safe_stems():

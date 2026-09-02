@@ -6,10 +6,22 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 
 MAP_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+MAPPING_SCAN_TOPICS = ("/ouster/scan", "/navigation/reconstructed_scan")
+
+
+def mapping_scan_is_fresh(
+    topic_seen: Mapping[str, float], now: float, max_age: float = 1.0
+) -> bool:
+    """Return whether either supported mapping scan arrived recently."""
+    latest = max(
+        (topic_seen[topic] for topic in MAPPING_SCAN_TOPICS if topic in topic_seen),
+        default=None,
+    )
+    return latest is not None and 0.0 <= now - latest <= max_age
 
 
 def validate_map_name(name: str) -> str:

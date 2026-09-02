@@ -28,6 +28,7 @@ from sensor_msgs.msg import Imu, LaserScan
 
 from .mapping_core import (
     MapGeometry,
+    mapping_scan_is_fresh,
     quaternion_yaw,
     render_occupancy_ppm,
     save_trinary_map,
@@ -169,6 +170,8 @@ class MappingWorker(Node):
         now = time.monotonic()
         with self._lock:
             self._topic_seen["/navigation/global_pose"] = now
+            if not mapping_scan_is_fresh(self._topic_seen, now):
+                return
             self._pose_xy = (message.pose.position.x, message.pose.position.y)
             self._state["pose"] = {
                 "x": message.pose.position.x,

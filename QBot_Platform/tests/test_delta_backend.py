@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -53,6 +54,18 @@ class FakeJetson:
         return 0, "", ""
 
     def probe(self, _recording_name):
+        return dict(self.probe_value)
+
+
+class BlockingJetson(FakeJetson):
+    def __init__(self):
+        super().__init__()
+        self.probe_started = threading.Event()
+        self.release_probe = threading.Event()
+
+    def probe(self, _recording_name):
+        self.probe_started.set()
+        self.release_probe.wait(2.0)
         return dict(self.probe_value)
 
 
@@ -160,6 +173,32 @@ class DeltaBackendTest(unittest.TestCase):
         self.backend._poll_worker()
         self.backend._poll_jetson()
         self.assertEqual(self.backend.get_state()["qbot"]["state"], "running")
+
+    def test_blocking_jetson_probe_does_not_block_worker_polling(self):
+        jetson = BlockingJetson()
+        worker_calls = 0
+        original_state = self.worker.state
+
+        def counted_state():
+            nonlocal worker_calls
+            worker_calls += 1
+            return original_state()
+
+        self.worker.state = counted_state
+        backend = DeltaBackend(
+            config=self.config,
+            worker_client=self.worker,
+            jetson_client=jetson,
+            start_monitor=True,
+        )
+        try:
+            self.assertTrue(jetson.probe_started.wait(0.5))
+            calls_during_probe = worker_calls
+            time.sleep(1.1)
+            self.assertGreaterEqual(worker_calls, calls_during_probe + 2)
+        finally:
+            jetson.release_probe.set()
+            backend.close()
 
     def test_saved_pair_is_copied_without_overwrite(self):
         source = Path(self.temporary.name) / "source"
