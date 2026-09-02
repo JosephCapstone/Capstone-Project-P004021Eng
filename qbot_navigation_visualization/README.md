@@ -4,6 +4,9 @@ For fresh installation and the exact live lab procedure, use
 [`docs/live_mapping_lab_guide.md`](../docs/live_mapping_lab_guide.md). The
 sections below provide package-level technical and playback details.
 
+The Windows DeltaUI_Joseph mapping worker and developer playback workflow are
+documented in [`docs/delta_ui_mapping.md`](../docs/delta_ui_mapping.md).
+
 This package creates two lightweight, Foxglove-ready navigation topics in PC
 WSL from Ouster ROS 2 topics published by the Jetson. It does not start, stop,
 or modify rosbag recording.

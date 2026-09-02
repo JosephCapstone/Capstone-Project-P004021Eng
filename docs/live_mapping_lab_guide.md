@@ -58,9 +58,10 @@ closest to horizontal. Do not substitute a fabricated `base_link` transform;
 use `os_lidar` until the mounting transform has been measured.
 
 Domain 7 is the project target, but every ROS process must use the same value.
-If the existing DeltaUI currently starts `run_qbot.sh` on the default domain 0,
-either configure DeltaUI to export domain 7 or use domain 0 in every WSL and
-Jetson shell for that lab session. Never split the machines across domains.
+DeltaUI_Joseph exports its configured domain (7 by default) when it starts
+`run_qbot.sh`. If you intentionally use the original DeltaUI, verify its domain
+and use that same value in every WSL and Jetson shell for the lab session. Never
+split the machines across domains.
 
 ## 1. One-time Windows and WSL preparation
 
@@ -249,8 +250,7 @@ to cross to WSL before being reduced to 5 Hz.
 
 ## 4. Start the QBot and Ouster
 
-Use the existing DeltaUI action or the existing Jetson command exactly as
-before. If starting it from PuTTY:
+Use the DeltaUI_Joseph **Start** action or the existing Jetson command. If starting it from PuTTY:
 
 ```bash
 cd /home/nvidia
@@ -259,10 +259,10 @@ export ROS_LOCALHOST_ONLY=0
 ./run_qbot.sh
 ```
 
-When using DeltaUI, confirm its launched ROS processes inherit domain 7. A
+When using DeltaUI_Joseph, confirm its launched ROS processes inherit domain 7. A
 quick check from another Jetson shell is `ROS_DOMAIN_ID=7 ros2 node list`. If
 that returns no QBot nodes but domain 0 does, use 0 consistently until the
-DeltaUI environment is updated.
+DeltaUI_Joseph environment is updated.
 
 In another Jetson PuTTY terminal, use the same ROS domain and start the cloud
 throttle:
@@ -485,7 +485,7 @@ Cartographer process starts with trajectory 0 and an empty session. Foxglove
 remains connected and the LiDAR FOV remains live throughout.
 
 To stop only the live FOV later, press Ctrl+C in WSL terminal 1. To stop the
-QBot and Ouster, use the existing DeltaUI/QBot shutdown procedure.
+QBot and Ouster, use the DeltaUI_Joseph/QBot shutdown procedure.
 
 ## 11. Updating the WSL checkout
 

@@ -1,0 +1,375 @@
+import sys
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QPushButton,
+    QHBoxLayout,
+    QPlainTextEdit,
+    QLineEdit,
+    QGroupBox,
+    QDialog
+)
+
+from delta_backend import DeltaBackend
+
+def show_infomation(parent):
+    info_dialog=QDialog(parent)
+    info_dialog.setObjectName("info_dialog")
+    info_dialog.setWindowTitle("About D.E.L.T.A")
+    info_dialog.setFixedSize(450,350)
+
+    info_dialog.setStyleSheet("""
+        QDialog#info_dialog{
+            border: 1px solid #888;
+            border-radius: 5px;
+        }
+    """)
+
+    dialog_layout = QVBoxLayout(info_dialog)
+
+    title_label = QLabel("D.E.L.T.A")
+    title_label.setStyleSheet("""
+            font-size: 24px;
+            font-weight: bold;
+        """)
+
+    description_label = QLabel(
+        "D.E.L.T.A is ..."
+    )
+
+    description_label.setWordWrap(True)
+
+    github_label = QLabel('<a href="https://github.com/JosephCapstone/Capstone-Project-P004021Eng">'
+                          "Github Repository"
+                          "</a>"
+    )
+
+    github_label.setOpenExternalLinks(True)
+
+    credits_label = QLabel(
+        "<b>The Team</b><br>"
+        "Alicia Prinzi<br>"
+        "Big Dylan Jarvis<br>"
+        "Jayson Bilek<br>"
+        "Mahmut Ercan<br>"
+        "Aaron Tuohill<br>"
+        "Joseph Hatton<br>"
+        "Callum Day<br>"
+        "Jordan Fabiyanic<br>"
+        "Tom Soepono<br>"
+        "Elias Bollas<br>"
+        "Codi Barrett<br>"
+        "Lucas Di Guglielmo<br>"
+        "Capstone Supervisor: Dr Amirali Khodadadian Gostar"
+    )
+
+    dialog_layout.addWidget(title_label)
+    dialog_layout.addWidget(description_label)
+    dialog_layout.addWidget(github_label)
+    dialog_layout.addSpacing(10)
+    dialog_layout.addWidget(credits_label)
+    dialog_layout.addStretch()
+
+    close_button = QPushButton("Close")
+    close_button.clicked.connect(info_dialog.accept)
+
+    dialog_layout.addWidget(close_button)
+
+    info_dialog.exec()
+
+class DeltaUI(QMainWindow):
+    def __init__(self, backend=None):
+        super().__init__()
+
+        self.backend = backend or DeltaBackend()
+        self.last_event_id = 0
+        self.last_map_version = -1
+        self.map_pixmap = None
+
+        self.setWindowTitle("D.E.L.T.A")
+        self.resize(1200, 800)
+
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+
+        main_layout = QVBoxLayout(central_widget)
+
+        # ---------- Title ----------
+
+        title_layout = QHBoxLayout()
+
+        title_label = QLabel("D.E.L.T.A")
+        title_label.setStyleSheet("""
+            font-size: 32px;
+            font-weight: bold;
+        """)
+
+        self.info_button = QPushButton("i")
+        self.info_button.setFixedSize(30,30)
+        self.info_button.setToolTip("About D.E.L.T.A")
+
+        self.info_button.clicked.connect(lambda: show_infomation(self))
+
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+        title_layout.addWidget(self.info_button)
+
+        main_layout.addLayout(title_layout)
+
+        # ---------- Camera ---------- (THIS SECTION SHOULD INCLUDE THE CAMERA FEED ASWELL AS SCAN DATA FOR NAVIGATING DARK AREAS)
+
+        camera_group = QGroupBox("Camera Feed")
+        camera_layout = QVBoxLayout(camera_group)
+
+        self.camera_label = QLabel("CAMERA FEED") #Temporary will remove
+        self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        camera_layout.addWidget(self.camera_label)
+
+        # ---------- Controls ----------
+
+        controls_group = QGroupBox("Controls")
+        controls_layout = QVBoxLayout(controls_group)
+
+        self.start_button = QPushButton("Start")
+        self.stop_button = QPushButton("Stop")
+
+        self.qbot_status_label = QLabel("QBot: checking")
+
+        self.start_button.clicked.connect(
+            lambda: self.run_action(self.backend.launch_script)
+        )
+        self.stop_button.clicked.connect(
+            lambda: self.run_action(self.backend.stop_script)
+        )
+
+        controls_layout.addWidget(self.qbot_status_label)
+        controls_layout.addWidget(self.start_button)
+        controls_layout.addWidget(self.stop_button)
+
+        # ---------- Recording ----------
+
+        recording_group = QGroupBox("Recording")
+        recording_layout = QVBoxLayout(recording_group)
+
+        self.bag_recording_number = QLineEdit()
+        self.bag_recording_number.setPlaceholderText("Recording Number")
+
+        self.start_recording_button = QPushButton("Start Recording")
+        self.stop_recording_button = QPushButton("Stop Recording")
+
+        self.recording_status_label = QLabel("Recording: checking")
+
+        self.start_recording_button.clicked.connect(
+            lambda: self.run_action(
+                self.backend.start_recording, self.bag_recording_number.text()
+            )
+        )
+        self.stop_recording_button.clicked.connect(
+            lambda: self.run_action(self.backend.stop_recording)
+        )
+
+        recording_layout.addWidget(self.recording_status_label)
+        recording_layout.addWidget(self.bag_recording_number)
+        recording_layout.addWidget(self.start_recording_button)
+        recording_layout.addWidget(self.stop_recording_button)
+
+        # ---------- Mapping ----------
+
+        mapping_group = QGroupBox("Mapping")
+        mapping_layout = QVBoxLayout(mapping_group)
+
+        self.mapping_status_label = QLabel("Mapping: connecting to WSL")
+        self.mapping_status_label.setWordWrap(True)
+
+        self.map_label = QLabel("LIVE MAP")
+        self.map_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.map_label.setMinimumSize(380, 380)
+
+        self.map_name = QLineEdit(self.backend.default_map_name())
+        self.map_name.setPlaceholderText("Map Name")
+
+        self.start_mapping_button = QPushButton("Start Mapping")
+        self.finish_mapping_button = QPushButton("Finish & Save")
+        self.cancel_mapping_button = QPushButton("Cancel")
+        self.new_map_button = QPushButton("New Map")
+
+        self.start_mapping_button.clicked.connect(
+            lambda: self.run_action(self.backend.start_mapping)
+        )
+        self.finish_mapping_button.clicked.connect(
+            lambda: self.run_action(
+                self.backend.finish_and_save, self.map_name.text()
+            )
+        )
+        self.cancel_mapping_button.clicked.connect(
+            lambda: self.run_action(self.backend.cancel_mapping)
+        )
+        self.new_map_button.clicked.connect(self.new_map)
+
+        mapping_buttons = QHBoxLayout()
+        mapping_buttons.addWidget(self.start_mapping_button)
+        mapping_buttons.addWidget(self.finish_mapping_button)
+        mapping_buttons.addWidget(self.cancel_mapping_button)
+        mapping_buttons.addWidget(self.new_map_button)
+
+        mapping_layout.addWidget(self.mapping_status_label)
+        mapping_layout.addWidget(self.map_label, 1)
+        mapping_layout.addWidget(self.map_name)
+        mapping_layout.addLayout(mapping_buttons)
+
+        # ---------- Log ----------
+
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+
+        log_layout.addWidget(self.log)
+
+        self.log.appendPlainText("D.E.L.T.A GUI started")
+        self.log.appendPlainText("Alicia, Dylan, Jayson, Mahmut, Aaron, Joseph, Callum, Jordan, Tom, Elias, Codi, Lucas")
+
+        # ---------- Layout ----------
+
+        control_panel_layout = QVBoxLayout()
+        control_panel_layout.addWidget(controls_group,2)
+        control_panel_layout.addWidget(recording_group,2)
+
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(camera_group,2)
+        top_layout.addWidget(mapping_group,3)
+        top_layout.addLayout(control_panel_layout,1)
+
+        main_layout.addLayout(top_layout,3)
+        main_layout.addWidget(log_group,1)
+
+        # ---------- Styling ---------- # MIGHT MOVE TO EACH INDIVIDUAL SECTION AS TO MAKE EVERYTHING UNIQUE IF I NEED TO
+
+        self.setStyleSheet("""
+        QGroupBox {
+            border-radius: 5px;
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #888;
+
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            top: 5px;
+            left: 10px;
+            padding: 0 5px;
+        }
+        """)
+
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.refresh_backend)
+        self.refresh_timer.start(500)
+        self.refresh_backend()
+
+    def run_action(self, action, *arguments):
+        try:
+            action(*arguments)
+        except (RuntimeError, ValueError) as error:
+            self.log.appendPlainText(f"Error: {error}")
+
+    def new_map(self):
+        self.run_action(self.backend.new_map)
+        self.map_name.setText(self.backend.default_map_name())
+
+    def refresh_backend(self):
+        state = self.backend.get_state()
+        qbot_state = state.get("qbot", {}).get("state", "unknown")
+        recording_state = state.get("recording", {}).get("state", "unknown")
+        mapping = state.get("mapping", {})
+        mapping_state = mapping.get("mapping", "unavailable")
+        visualization_state = state.get("visualization", {}).get("state", "unknown")
+
+        self.qbot_status_label.setText(f"QBot: {qbot_state}")
+        self.recording_status_label.setText(f"Recording: {recording_state}")
+        self.mapping_status_label.setText(
+            f"Mapping: {mapping_state} | View: {visualization_state}\n"
+            f"{mapping.get('detail', '')}"
+        )
+
+        self.start_button.setEnabled(qbot_state in ("stopped", "offline", "error"))
+        self.stop_button.setEnabled(
+            qbot_state in ("starting", "running", "degraded", "stopping")
+        )
+        self.start_recording_button.setEnabled(
+            recording_state in ("stopped", "error")
+            and qbot_state in ("running", "degraded")
+        )
+        self.stop_recording_button.setEnabled(
+            recording_state in ("starting", "recording", "degraded", "stopping")
+        )
+        self.start_mapping_button.setEnabled(mapping_state == "ready")
+        self.finish_mapping_button.setEnabled(
+            mapping_state in ("mapping", "playback_complete", "save_failed")
+        )
+        self.cancel_mapping_button.setEnabled(
+            mapping_state in ("starting", "mapping", "playback_complete", "save_failed")
+        )
+        self.new_map_button.setEnabled(
+            mapping_state in ("saved", "cancelled", "error")
+        )
+
+        for event in state.get("events", []):
+            if event.get("id", 0) > self.last_event_id:
+                self.last_event_id = event["id"]
+                self.log.appendPlainText(event.get("message", ""))
+
+        map_version, map_data = self.backend.get_map()
+        if map_version != self.last_map_version:
+            self.last_map_version = map_version
+            if map_data:
+                pixmap = QPixmap()
+                if pixmap.loadFromData(map_data, "PPM"):
+                    self.map_pixmap = pixmap
+                    self.update_map_scale()
+            else:
+                self.map_pixmap = None
+                self.map_label.setPixmap(QPixmap())
+                self.map_label.setText("LIVE MAP")
+
+        windows_paths = state.get("windows_saved_paths")
+        if windows_paths and mapping_state == "saved":
+            self.mapping_status_label.setToolTip(
+                f"PGM: {windows_paths['pgm']}\nYAML: {windows_paths['yaml']}"
+            )
+
+    def update_map_scale(self):
+        if self.map_pixmap is None:
+            return
+        self.map_label.setPixmap(
+            self.map_pixmap.scaled(
+                self.map_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_map_scale()
+
+    def closeEvent(self, event):
+        self.refresh_timer.stop()
+        self.backend.close()
+        event.accept()
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+
+    window = DeltaUI()
+    window.show()
+
+    sys.exit(app.exec())
