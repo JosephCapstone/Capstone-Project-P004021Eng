@@ -5,11 +5,12 @@ import time
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from delta_backend import BackendConfig, DeltaBackend  # noqa: E402
+from delta_backend import BackendConfig, DeltaBackend, select_jetson_host  # noqa: E402
 
 
 class FakeWorker:
@@ -103,6 +104,23 @@ class DeltaBackendTest(unittest.TestCase):
             BackendConfig().ros_workspace,
             "/home/ernie/Capstone-Project-P004021Eng",
         )
+
+    def test_jetson_host_is_selected_once_at_startup(self):
+        attempts = []
+
+        def connect(address, timeout):
+            attempts.append((address, timeout))
+            if address[0] == "192.168.137.33":
+                raise OSError("unreachable")
+            return unittest.mock.Mock()
+
+        with patch("delta_backend.socket.create_connection", side_effect=connect):
+            self.assertEqual(select_jetson_host(), "192.168.0.157")
+
+        self.assertEqual([address[0] for address, _timeout in attempts], [
+            "192.168.137.33",
+            "192.168.0.157",
+        ])
 
     def test_map_and_recording_names_are_validated(self):
         self.assertEqual(self.backend.validate_map_name("delta_map_1"), "delta_map_1")

@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -27,6 +28,19 @@ from typing import Any, Callable, Optional
 
 SAFE_RECORDING_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 SAFE_MAP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+JETSON_HOSTS = ("192.168.137.33", "192.168.0.157")
+
+
+def select_jetson_host(timeout: float = 0.75) -> str:
+    """Select a reachable Jetson address once during Delta startup."""
+    for host in JETSON_HOSTS:
+        try:
+            connection = socket.create_connection((host, 22), timeout=timeout)
+            connection.close()
+            return host
+        except OSError:
+            continue
+    return JETSON_HOSTS[0]
 
 
 @dataclass(frozen=True)
@@ -46,7 +60,7 @@ class BackendConfig:
         documents_root = Path(os.environ.get("OneDrive", Path.home())) / "Documents"
         default_maps = documents_root / "DELTA Maps"
         return cls(
-            jetson_host=os.environ.get("DELTA_JETSON_HOST", "192.168.137.33"),
+            jetson_host=os.environ.get("DELTA_JETSON_HOST") or select_jetson_host(),
             jetson_username=os.environ.get("DELTA_JETSON_USERNAME", "nvidia"),
             jetson_password=os.environ.get("DELTA_JETSON_PASSWORD", "nvidia"),
             wsl_distro=os.environ.get("DELTA_WSL_DISTRO", "Ubuntu-22.04"),
