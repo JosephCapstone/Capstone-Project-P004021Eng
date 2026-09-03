@@ -119,6 +119,11 @@ class WorkerClient:
         version = int(headers.get("X-Map-Version", "0"))
         return version, body if status == 200 and body else None
 
+    def camera_image(self) -> tuple[int, Optional[bytes]]:
+        body, headers, status = self._request("/camera.ppm")
+        version = int(headers.get("X-Camera-Version", "0"))
+        return version, body if status == 200 and body else None
+
     def post(self, path: str, payload: Optional[dict[str, Any]] = None) -> None:
         self._request(path, {} if payload is None else payload)
 
@@ -207,6 +212,7 @@ class DeltaBackend:
         self._stop_event = threading.Event()
         self._executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="delta-ui")
         self._monitor_thread: Optional[threading.Thread] = None
+        self._camera_thread: Optional[threading.Thread] = None
         self._worker_start_attempt = 0.0
         self._jetson_poll_time = 0.0
         self._jetson_poll_in_flight = False
@@ -224,6 +230,8 @@ class DeltaBackend:
         self._worker_event_id = 0
         self._map_version = -1
         self._map_image: Optional[bytes] = None
+        self._camera_version = -1
+        self._camera_image: Optional[bytes] = None
         self._event_id = 0
         self._events: list[dict[str, Any]] = []
         self._state: dict[str, Any] = {
@@ -253,6 +261,10 @@ class DeltaBackend:
                 target=self._monitor_loop, name="delta-monitor", daemon=True
             )
             self._monitor_thread.start()
+            self._camera_thread = threading.Thread(
+                target=self._camera_loop, name="delta-camera", daemon=True
+            )
+            self._camera_thread.start()
 
     @staticmethod
     def default_map_name() -> str:
@@ -303,6 +315,20 @@ class DeltaBackend:
             if time.monotonic() - self._jetson_poll_time >= 3.0:
                 self._schedule_jetson_poll()
             self._stop_event.wait(0.5)
+
+    def _camera_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                version, camera_image = self.worker.camera_image()
+                with self._lock:
+                    if version != self._camera_version:
+                        self._camera_version = version
+                        self._camera_image = camera_image
+            except Exception:
+                # Worker availability is reported by the main monitor. Camera
+                # polling stays independent so a slow frame cannot stall it.
+                pass
+            self._stop_event.wait(0.1)
 
     def _schedule_jetson_poll(self) -> None:
         with self._lock:
@@ -697,8 +723,14 @@ class DeltaBackend:
         with self._lock:
             return self._map_version, self._map_image
 
+    def get_camera(self) -> tuple[int, Optional[bytes]]:
+        with self._lock:
+            return self._camera_version, self._camera_image
+
     def close(self) -> None:
         self._stop_event.set()
         if self._monitor_thread is not None:
             self._monitor_thread.join(timeout=1.0)
+        if self._camera_thread is not None:
+            self._camera_thread.join(timeout=1.0)
         self._executor.shutdown(wait=False, cancel_futures=False)

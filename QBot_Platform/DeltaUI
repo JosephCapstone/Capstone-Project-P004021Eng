@@ -159,9 +159,10 @@ class RosCameraSubscriber(QObject):
 
         self.node = rclpy.create_node("delta_camera_subscriber")
 
-        self.subscription = self.node.create_subscription(Image, "/topic/name", self.image_callback, 10)
+        self.subscription = self.node.create_subscription(Image, "/camera/color_image", self.image_callback, 10)
 
-    def image_callback(self, msg):
+    def image_callback(self, msg, log):
+        log.appendPlainText("Image received")
         frame = self.bridge.imgmsg_to_cv2(msg,desired_encoding="bgr8")
         frame = cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
 

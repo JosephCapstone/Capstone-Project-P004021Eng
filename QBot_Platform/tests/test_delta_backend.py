@@ -10,11 +10,19 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from delta_backend import BackendConfig, DeltaBackend, select_jetson_host  # noqa: E402
+from delta_backend import (  # noqa: E402
+    BackendConfig,
+    DeltaBackend,
+    WorkerClient,
+    select_jetson_host,
+)
 
 
 class FakeWorker:
     def __init__(self):
+        self.camera_calls = 0
+        self.camera_version = 0
+        self.camera_data = None
         self.posts = []
         self.worker_state = {
             "mapping": "ready",
@@ -35,6 +43,10 @@ class FakeWorker:
 
     def map_image(self):
         return self.worker_state["map_version"], None
+
+    def camera_image(self):
+        self.camera_calls += 1
+        return self.camera_version, self.camera_data
 
     def post(self, path, payload=None):
         self.posts.append((path, payload))
@@ -137,6 +149,16 @@ class DeltaBackendTest(unittest.TestCase):
         self.assertIn("ROS_DOMAIN_ID=7", command)
         self.assertEqual(self.backend.get_state()["qbot"]["state"], "starting")
 
+    def test_worker_client_fetches_latest_camera_frame(self):
+        client = WorkerClient("http://127.0.0.1:8766")
+        with patch.object(
+            client,
+            "_request",
+            return_value=(b"ppm-frame", {"X-Camera-Version": "4"}, 200),
+        ) as request:
+            self.assertEqual(client.camera_image(), (4, b"ppm-frame"))
+        request.assert_called_once_with("/camera.ppm")
+
     def test_worker_start_discovers_workspace_and_verifies_health(self):
         commands = []
 
@@ -214,6 +236,29 @@ class DeltaBackendTest(unittest.TestCase):
             calls_during_probe = worker_calls
             time.sleep(1.1)
             self.assertGreaterEqual(worker_calls, calls_during_probe + 2)
+        finally:
+            jetson.release_probe.set()
+            backend.close()
+
+    def test_camera_polling_continues_while_jetson_probe_blocks(self):
+        jetson = BlockingJetson()
+        backend = DeltaBackend(
+            config=self.config,
+            worker_client=self.worker,
+            jetson_client=jetson,
+            start_monitor=True,
+        )
+        try:
+            self.assertTrue(jetson.probe_started.wait(0.5))
+            self.worker.camera_version = 7
+            self.worker.camera_data = b"ppm-frame"
+            wait_for(lambda: backend.get_camera() == (7, b"ppm-frame"))
+            calls_during_probe = self.worker.camera_calls
+            time.sleep(0.25)
+            self.assertGreaterEqual(
+                self.worker.camera_calls,
+                calls_during_probe + 2,
+            )
         finally:
             jetson.release_probe.set()
             backend.close()

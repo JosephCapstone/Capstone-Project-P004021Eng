@@ -24,7 +24,7 @@ from geometry_msgs.msg import PoseStamped, TwistStamped
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Imu, LaserScan
+from sensor_msgs.msg import Image, Imu, LaserScan
 
 from .mapping_core import (
     MapGeometry,
@@ -35,6 +35,35 @@ from .mapping_core import (
     validate_map_name,
     validate_saved_map,
 )
+
+
+def render_camera_ppm(message: Image) -> bytes:
+    """Convert an RGB/BGR ROS image to a displayable PPM."""
+    width = int(message.width)
+    height = int(message.height)
+    encoding = message.encoding.lower()
+    if encoding not in ("bgr8", "rgb8"):
+        raise ValueError(f"Unsupported camera encoding: {message.encoding}")
+
+    row_bytes = width * 3
+    step = int(message.step)
+    data = bytes(message.data)
+    if width <= 0 or height <= 0:
+        raise ValueError("Camera frame dimensions must be positive")
+    if step < row_bytes:
+        raise ValueError("Camera frame step is smaller than its RGB row")
+    if len(data) < step * height:
+        raise ValueError("Camera frame data is shorter than its dimensions")
+
+    pixels = bytearray()
+    for row in range(height):
+        start = row * step
+        pixels.extend(data[start:start + row_bytes])
+    if encoding == "bgr8":
+        pixels[0::3], pixels[2::3] = pixels[2::3], pixels[0::3]
+
+    header = f"P6\n{width} {height}\n255\n".encode("ascii")
+    return header + bytes(pixels)
 
 
 ACTIVE_MAPPING_STATES = {
@@ -65,6 +94,9 @@ class MappingWorker(Node):
         self._latest_map: Optional[OccupancyGrid] = None
         self._pose_xy: Optional[tuple[float, float]] = None
         self._rendered_map: Optional[bytes] = None
+        self._camera_image: Optional[bytes] = None
+        self._camera_version = 0
+        self._last_camera_render = 0.0
         self._last_pose_render = 0.0
         self._topic_seen: dict[str, float] = {}
         self._node_names: set[str] = set()
@@ -81,6 +113,7 @@ class MappingWorker(Node):
             "detail": "Ready to start mapping",
             "error": None,
             "map_version": 0,
+            "camera_version": 0,
             "map": None,
             "pose": None,
             "process_running": False,
@@ -125,6 +158,12 @@ class MappingWorker(Node):
             lambda _message: self._mark_topic("/qbot_speed_feedback"),
             10,
         )
+        self.create_subscription(
+            Image,
+            "/camera/color_image",
+            self._camera_callback,
+            rclpy.qos.qos_profile_sensor_data,
+        )
 
         self._finish_client = self.create_client(
             FinishTrajectory, "/finish_trajectory"
@@ -165,6 +204,23 @@ class MappingWorker(Node):
             self._topic_seen["/navigation/global_map"] = time.monotonic()
             self._latest_map = message
             self._render_locked()
+
+    def _camera_callback(self, message: Image) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._topic_seen["/camera/color_image"] = now
+            if now - self._last_camera_render < 0.1:
+                return
+            self._last_camera_render = now
+        try:
+            image = render_camera_ppm(message)
+        except ValueError as error:
+            self.get_logger().warning(f"Could not render camera frame: {error}")
+            return
+        with self._lock:
+            self._camera_image = image
+            self._camera_version += 1
+            self._state["camera_version"] = self._camera_version
 
     def _pose_callback(self, message: PoseStamped) -> None:
         now = time.monotonic()
@@ -222,6 +278,7 @@ class MappingWorker(Node):
             "/qbot_speed_feedback",
             "/navigation/global_map",
             "/navigation/global_pose",
+            "/camera/color_image",
         )
         return {
             topic: None
@@ -837,6 +894,10 @@ class MappingWorker(Node):
         with self._lock:
             return self._state["map_version"], self._rendered_map
 
+    def get_camera(self) -> tuple[int, Optional[bytes]]:
+        with self._lock:
+            return self._camera_version, self._camera_image
+
     def destroy_node(self) -> bool:
         self._executor.shutdown(wait=False, cancel_futures=False)
         return super().destroy_node()
@@ -887,6 +948,20 @@ def build_handler(worker: MappingWorker):
                 self.send_header("Content-Type", "image/x-portable-pixmap")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("X-Map-Version", str(version))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            if self.path.startswith("/camera.ppm"):
+                version, data = worker.get_camera()
+                if data is None:
+                    self.send_response(204)
+                    self.send_header("X-Camera-Version", str(version))
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/x-portable-pixmap")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("X-Camera-Version", str(version))
                 self.end_headers()
                 self.wfile.write(data)
                 return

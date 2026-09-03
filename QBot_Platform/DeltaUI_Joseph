@@ -90,7 +90,10 @@ class DeltaUI(QMainWindow):
         self.backend = backend or DeltaBackend()
         self.last_event_id = 0
         self.last_map_version = -1
+        self.last_camera_version = -1
         self.map_pixmap = None
+        self.camera_pixmap = None
+        self.camera_topic_fresh = False
 
         self.setWindowTitle("D.E.L.T.A")
         self.resize(1200, 800)
@@ -122,13 +125,14 @@ class DeltaUI(QMainWindow):
 
         main_layout.addLayout(title_layout)
 
-        # ---------- Camera ---------- (THIS SECTION SHOULD INCLUDE THE CAMERA FEED ASWELL AS SCAN DATA FOR NAVIGATING DARK AREAS)
+        # ---------- Camera ----------
 
         camera_group = QGroupBox("Camera Feed")
         camera_layout = QVBoxLayout(camera_group)
 
-        self.camera_label = QLabel("CAMERA FEED") #Temporary will remove
+        self.camera_label = QLabel("Waiting for camera")
         self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_label.setMinimumSize(360, 240)
 
         camera_layout.addWidget(self.camera_label)
 
@@ -273,6 +277,10 @@ class DeltaUI(QMainWindow):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_backend)
         self.refresh_timer.start(500)
+
+        self.camera_timer = QTimer(self)
+        self.camera_timer.timeout.connect(self.refresh_camera)
+        self.camera_timer.start(100)
         self.refresh_backend()
 
     def run_action(self, action, *arguments):
@@ -292,6 +300,21 @@ class DeltaUI(QMainWindow):
         mapping = state.get("mapping", {})
         mapping_state = mapping.get("mapping", "unavailable")
         visualization_state = state.get("visualization", {}).get("state", "unknown")
+        camera_age = mapping.get("topic_ages", {}).get(
+            "/camera/color_image"
+        )
+        camera_topic_fresh = camera_age is not None and camera_age <= 2.0
+
+        if not camera_topic_fresh and self.camera_topic_fresh:
+            self.clear_camera("Camera feed unavailable")
+        elif not camera_topic_fresh and self.camera_pixmap is None:
+            message = (
+                "Camera starts with QBot"
+                if qbot_state in ("stopped", "offline", "error")
+                else "Waiting for camera"
+            )
+            self.camera_label.setText(message)
+        self.camera_topic_fresh = camera_topic_fresh
 
         self.qbot_status_label.setText(f"QBot: {qbot_state}")
         self.recording_status_label.setText(f"Recording: {recording_state}")
@@ -346,6 +369,39 @@ class DeltaUI(QMainWindow):
                 f"PGM: {windows_paths['pgm']}\nYAML: {windows_paths['yaml']}"
             )
 
+    def refresh_camera(self):
+        if not self.camera_topic_fresh:
+            return
+        camera_version, camera_data = self.backend.get_camera()
+        if camera_version == self.last_camera_version:
+            return
+        self.last_camera_version = camera_version
+        if not camera_data:
+            return
+        pixmap = QPixmap()
+        if pixmap.loadFromData(camera_data, "PPM"):
+            self.camera_pixmap = pixmap
+            self.camera_label.setText("")
+            self.update_camera_scale()
+        else:
+            self.clear_camera("Camera frame could not be decoded")
+
+    def clear_camera(self, message):
+        self.camera_pixmap = None
+        self.camera_label.setPixmap(QPixmap())
+        self.camera_label.setText(message)
+
+    def update_camera_scale(self):
+        if self.camera_pixmap is None:
+            return
+        self.camera_label.setPixmap(
+            self.camera_pixmap.scaled(
+                self.camera_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
     def update_map_scale(self):
         if self.map_pixmap is None:
             return
@@ -359,10 +415,12 @@ class DeltaUI(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.update_camera_scale()
         self.update_map_scale()
 
     def closeEvent(self, event):
         self.refresh_timer.stop()
+        self.camera_timer.stop()
         self.backend.close()
         event.accept()
 

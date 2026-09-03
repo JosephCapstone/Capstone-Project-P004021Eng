@@ -4,7 +4,9 @@
 original `QBot_Platform/DeltaUI` remains unchanged. Its backend facade uses SSH
 for the existing Jetson scripts and connects to a ROS-aware worker in WSL.
 The worker owns mapping processes, observes ROS topics and services, and serves
-the live accumulated map to DeltaUI_Joseph on `http://127.0.0.1:8766`.
+the live accumulated map and latest RGB frame to DeltaUI_Joseph on
+`http://127.0.0.1:8766`. The Windows application does not require ROS or OpenCV
+camera dependencies.
 
 Closing DeltaUI_Joseph does not stop the QBot, recording, or an active mapping
 session. Reopening it reconnects to the existing WSL worker.
@@ -52,6 +54,14 @@ automatically. Configuration can be overridden with:
 | `DELTA_ROS_DOMAIN_ID` | `7` |
 | `DELTA_WORKER_URL` | `http://127.0.0.1:8766` |
 | `DELTA_MAPS_WINDOWS_DIR` | Windows `Documents\DELTA Maps` |
+
+## Camera feed
+
+The camera viewer starts with DeltaUI_Joseph and waits for the existing QBot
+**Start** action to bring the hardware online. It subscribes to the normal
+Jetson `/camera/color_image` topic; no compressed transport or camera controls
+are required. The WSL worker converts the latest raw RGB frame to PPM only for
+display in the Windows UI.
 
 ## Mapping controls
 
