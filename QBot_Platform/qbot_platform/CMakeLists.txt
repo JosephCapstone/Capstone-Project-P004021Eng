@@ -60,7 +60,7 @@ ament_target_dependencies(csi rclcpp cv_bridge image_transport OpenCV std_msgs s
 
 add_executable(command src/command.cpp)
 target_link_libraries(command -lquanser_devices -lquanser_communications -lquanser_runtime -lquanser_common)
-ament_target_dependencies(command rclcpp geometry_msgs std_msgs)
+ament_target_dependencies(command rclcpp geometry_msgs)
 
 
 # TF

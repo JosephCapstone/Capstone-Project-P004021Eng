@@ -1,5 +1,4 @@
 #include "rclcpp/rclcpp.hpp"
-#include "rclcpp/parameter_client.hpp"
 
 #include <geometry_msgs/msg/twist.hpp>
 
@@ -60,7 +59,6 @@ class CommandPublisher : public rclcpp::Node
     : Node("joystick_publisher")
     {
 
-    param_client_ = std::make_shared<rclcpp:AsyncParametersClient>(this, "qbot_platform_driver_interface");
     command_publisher_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
     // Creates the publisher that will talk to the qbot_led_strip topic
     led_publisher_ = this->create_publisher<std_msgs::msg::ColorRGBA>("qbot_led_strip", 10);
@@ -92,8 +90,6 @@ class CommandPublisher : public rclcpp::Node
                 // Makes LB a toggle and not a hold
                 if (LB && !prevLB){
                     armed = !armed;
-
-                    param_client_->set_parameters({rclcpp:Parameters("arm_robot", armed)});
 
                 }
                 prevLB = LB;   
@@ -145,15 +141,8 @@ class CommandPublisher : public rclcpp::Node
                 // Publishes led to qbot_led_strip topic
                 this->led_publisher_->publish(led);
             }
-
-
-
             };
         game_controller_close(gamepad);
-
-
-
-
     };
 
     timer_ = this->create_wall_timer(100ms, timer_callback);
@@ -163,15 +152,11 @@ class CommandPublisher : public rclcpp::Node
         rclcpp::TimerBase::SharedPtr timer_;
         rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr command_publisher_;
         rclcpp::Publisher<std_msgs::msg::ColorRGBA>::SharedPtr led_publisher_;
-        std::shared_ptr<rclcpp::AsyncParametersClient> param_client_;
-
 };
 
 
 int main(int argc, char ** argv)
 {
-
-
     // Node creation
     rclcpp::init(argc, argv);
     rclcpp::spin(std::make_shared<CommandPublisher>());
