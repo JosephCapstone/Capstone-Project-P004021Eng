@@ -1,6 +1,7 @@
 # Capstone-Project-P004021Eng
 
-GitHub repository for DELTA.
+GitHub repository for DELTA. (Explain what it does ...)
+
 
 ## Joseph mapping UI
 
