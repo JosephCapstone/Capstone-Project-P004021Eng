@@ -54,8 +54,9 @@ def show_infomation(parent):
 
     credits_label = QLabel(
         "<b>The Team</b><br>"
+        "Capstone Supervisor: Dr Amirali Khodadadian Gostar"
         "Alicia Prinzi<br>"
-        "Big Dylan Jarvis<br>"
+        "Dylan Jarvis<br>"
         "Jayson Bilek<br>"
         "Mahmut Ercan<br>"
         "Aaron Tuohill<br>"
@@ -66,7 +67,6 @@ def show_infomation(parent):
         "Elias Bollas<br>"
         "Codi Barrett<br>"
         "Lucas Di Guglielmo<br>"
-        "Capstone Supervisor: Dr Amirali Khodadadian Gostar"
     )
 
     dialog_layout.addWidget(title_label)
@@ -146,12 +146,8 @@ class DeltaUI(QMainWindow):
 
         self.qbot_status_label = QLabel("QBot: checking")
 
-        self.start_button.clicked.connect(
-            lambda: self.run_action(self.backend.launch_script)
-        )
-        self.stop_button.clicked.connect(
-            lambda: self.run_action(self.backend.stop_script)
-        )
+        self.start_button.clicked.connect(lambda: self.run_action(self.backend.launch_script))
+        self.stop_button.clicked.connect(lambda: self.run_action(self.backend.stop_script))
 
         controls_layout.addWidget(self.qbot_status_label)
         controls_layout.addWidget(self.start_button)
@@ -170,21 +166,15 @@ class DeltaUI(QMainWindow):
 
         self.recording_status_label = QLabel("Recording: checking")
 
-        self.start_recording_button.clicked.connect(
-            lambda: self.run_action(
-                self.backend.start_recording, self.bag_recording_number.text()
-            )
-        )
-        self.stop_recording_button.clicked.connect(
-            lambda: self.run_action(self.backend.stop_recording)
-        )
+        self.start_recording_button.clicked.connect(lambda: self.run_action(self.backend.start_recording, self.bag_recording_number.text()))
+        self.stop_recording_button.clicked.connect(lambda: self.run_action(self.backend.stop_recording))
 
         recording_layout.addWidget(self.recording_status_label)
         recording_layout.addWidget(self.bag_recording_number)
         recording_layout.addWidget(self.start_recording_button)
         recording_layout.addWidget(self.stop_recording_button)
 
-        # ---------- Mapping ----------
+        # ---------- 2D Mapping ----------
 
         mapping_group = QGroupBox("Mapping")
         mapping_layout = QVBoxLayout(mapping_group)
@@ -204,17 +194,9 @@ class DeltaUI(QMainWindow):
         self.cancel_mapping_button = QPushButton("Cancel")
         self.new_map_button = QPushButton("New Map")
 
-        self.start_mapping_button.clicked.connect(
-            lambda: self.run_action(self.backend.start_mapping)
-        )
-        self.finish_mapping_button.clicked.connect(
-            lambda: self.run_action(
-                self.backend.finish_and_save, self.map_name.text()
-            )
-        )
-        self.cancel_mapping_button.clicked.connect(
-            lambda: self.run_action(self.backend.cancel_mapping)
-        )
+        self.start_mapping_button.clicked.connect(lambda: self.run_action(self.backend.start_mapping))
+        self.finish_mapping_button.clicked.connect(lambda: self.run_action(self.backend.finish_and_save, self.map_name.text()))
+        self.cancel_mapping_button.clicked.connect(lambda: self.run_action(self.backend.cancel_mapping))
         self.new_map_button.clicked.connect(self.new_map)
 
         mapping_buttons = QHBoxLayout()
@@ -239,7 +221,6 @@ class DeltaUI(QMainWindow):
         log_layout.addWidget(self.log)
 
         self.log.appendPlainText("D.E.L.T.A GUI started")
-        self.log.appendPlainText("Alicia, Dylan, Jayson, Mahmut, Aaron, Joseph, Callum, Jordan, Tom, Elias, Codi, Lucas")
 
         # ---------- Layout ----------
 
@@ -255,7 +236,7 @@ class DeltaUI(QMainWindow):
         main_layout.addLayout(top_layout,3)
         main_layout.addWidget(log_group,1)
 
-        # ---------- Styling ---------- # MIGHT MOVE TO EACH INDIVIDUAL SECTION AS TO MAKE EVERYTHING UNIQUE IF I NEED TO
+        # ---------- Styling ----------
 
         self.setStyleSheet("""
         QGroupBox {
@@ -274,6 +255,8 @@ class DeltaUI(QMainWindow):
         }
         """)
 
+        # ---------- Timer (No idea what this is) ----------
+
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_backend)
         self.refresh_timer.start(500)
@@ -282,6 +265,8 @@ class DeltaUI(QMainWindow):
         self.camera_timer.timeout.connect(self.refresh_camera)
         self.camera_timer.start(100)
         self.refresh_backend()
+
+    # does everything else below need to be inside the class, or can they be outside like def show_infomation
 
     def run_action(self, action, *arguments):
         try:
