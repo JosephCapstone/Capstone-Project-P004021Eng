@@ -50,7 +50,7 @@ class BackendConfig:
     jetson_password: str = "nvidia"
     wsl_distro: str = "Ubuntu-22.04"
     ros_workspace: str = "/home/ernie/Capstone-Project-P004021Eng"
-    ros_domain_id: int = 7
+    ros_domain_id: int = 0
     worker_url: str = "http://127.0.0.1:8766"
     worker_port: int = 8766
     windows_map_directory: Path = Path.home() / "Documents" / "DELTA Maps"
@@ -67,7 +67,7 @@ class BackendConfig:
             ros_workspace=os.environ.get(
                 "DELTA_ROS_WS", "/home/ernie/Capstone-Project-P004021Eng"
             ),
-            ros_domain_id=int(os.environ.get("DELTA_ROS_DOMAIN_ID", "7")),
+            ros_domain_id=int(os.environ.get("DELTA_ROS_DOMAIN_ID", "0")),
             worker_url=os.environ.get(
                 "DELTA_WORKER_URL", "http://127.0.0.1:8766"
             ).rstrip("/"),
