@@ -95,7 +95,7 @@ class DeltaUI(QMainWindow):
         self.camera_pixmap = None
         self.camera_topic_fresh = False
 
-        self.setWindowTitle("D.E.L.T.A")
+        self.setWindowTitle("D.E.L.T.A Operator Interface")
         self.resize(1200, 800)
 
         central_widget = QWidget()
@@ -224,17 +224,18 @@ class DeltaUI(QMainWindow):
 
         # ---------- Layout ----------
 
-        control_panel_layout = QVBoxLayout()
-        control_panel_layout.addWidget(controls_group,2)
-        control_panel_layout.addWidget(recording_group,2)
-
         top_layout = QHBoxLayout()
-        top_layout.addWidget(camera_group,2)
-        top_layout.addWidget(mapping_group,3)
-        top_layout.addLayout(control_panel_layout,1)
+        top_layout.setSpacing(10)
+        top_layout.addWidget(camera_group,7)
+        top_layout.addWidget(mapping_group,4)
 
-        main_layout.addLayout(top_layout,3)
-        main_layout.addWidget(log_group,1)
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(controls_group,1)
+        button_layout.addWidget(recording_group,1)
+
+        main_layout.addLayout(top_layout,7)
+        main_layout.addLayout(button_layout,2)
+        main_layout.addWidget(log_group,4)
 
         # ---------- Styling ----------
 
@@ -255,7 +256,7 @@ class DeltaUI(QMainWindow):
         }
         """)
 
-        # ---------- Timer (No idea what this is) ----------
+        # ---------- Timer (poll backened state and camera) ----------
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_backend)
