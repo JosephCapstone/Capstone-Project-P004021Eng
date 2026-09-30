@@ -54,7 +54,7 @@ def show_infomation(parent):
 
     credits_label = QLabel(
         "<b>The Team</b><br>"
-        "Capstone Supervisor: Dr Amirali Khodadadian Gostar"
+        "Capstone Supervisor: Dr Amirali Khodadadian Gostar<br>"
         "Alicia Prinzi<br>"
         "Dylan Jarvis<br>"
         "Jayson Bilek<br>"
@@ -223,7 +223,6 @@ class DeltaUI(QMainWindow):
         self.log.appendPlainText("D.E.L.T.A GUI started")
 
         # ---------- Layout ----------
-
         top_layout = QHBoxLayout()
         top_layout.setSpacing(10)
         top_layout.addWidget(camera_group,7)

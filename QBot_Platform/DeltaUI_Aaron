@@ -2,8 +2,17 @@ import sys
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QApplication, 
+    QDialog, 
+    QGroupBox, 
+    QHBoxLayout, 
+    QLabel, 
+    QLineEdit,
+    QMainWindow, 
+    QPlainTextEdit, 
+    QPushButton, 
+    QVBoxLayout, 
+    QWidget,
 )
 from delta_backend import DeltaBackend
 
