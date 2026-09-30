@@ -27,46 +27,8 @@ def show_infomation(parent):
 
     info_dialog = QDialog(parent)
 
-    info_dialog.setObjectName("info_dialog")
     info_dialog.setWindowTitle("About D.E.L.T.A")
     info_dialog.setFixedSize(500, 560)
-
-    # ========================================================
-    # ABOUT WINDOW THEME
-    # ========================================================
-
-    info_dialog.setStyleSheet("""
-        QDialog#info_dialog {
-            background-color: #0B1F33;
-        }
-
-        QLabel {
-            color: #E8EEF4;
-            background-color: transparent;
-            font-size: 13px;
-        }
-
-        QPushButton {
-            background-color: #234A6F;
-            color: #FFFFFF;
-
-            border: 1px solid #52789C;
-            border-radius: 5px;
-
-            min-height: 36px;
-
-            padding: 4px 10px;
-        }
-
-        QPushButton:hover {
-            background-color: #2E5D88;
-            border: 1px solid #75A3CC;
-        }
-
-        QPushButton:pressed {
-            background-color: #183A59;
-        }
-    """)
 
     dialog_layout = QVBoxLayout(info_dialog)
 
@@ -86,11 +48,9 @@ def show_infomation(parent):
     title_label = QLabel("D.E.L.T.A")
 
     title_label.setStyleSheet("""
-        QLabel {
-            font-size: 26px;
-            font-weight: bold;
-            color: #FFFFFF;
-        }
+        font-size: 26px;
+        font-weight: bold;
+        color: black;
     """)
 
     dialog_layout.addWidget(title_label)
@@ -107,13 +67,6 @@ def show_infomation(parent):
 
     description_label.setWordWrap(True)
 
-    description_label.setStyleSheet("""
-        QLabel {
-            color: #C8D6E5;
-            font-size: 13px;
-        }
-    """)
-
     dialog_layout.addWidget(description_label)
 
     # ========================================================
@@ -121,8 +74,7 @@ def show_infomation(parent):
     # ========================================================
 
     github_label = QLabel(
-        '<a style="color:#76A9D4;" '
-        'href="https://github.com/JosephCapstone/Capstone-Project-P004021Eng">'
+        '<a href="https://github.com/JosephCapstone/Capstone-Project-P004021Eng">'
         "GitHub Repository"
         "</a>"
     )
@@ -132,7 +84,7 @@ def show_infomation(parent):
     dialog_layout.addWidget(github_label)
 
     # ========================================================
-    # TEAM HEADING
+    # TEAM
     # ========================================================
 
     dialog_layout.addSpacing(8)
@@ -140,11 +92,9 @@ def show_infomation(parent):
     team_heading = QLabel("The Team")
 
     team_heading.setStyleSheet("""
-        QLabel {
-            color: #FFFFFF;
-            font-size: 16px;
-            font-weight: bold;
-        }
+        font-size: 16px;
+        font-weight: bold;
+        color: black;
     """)
 
     dialog_layout.addWidget(team_heading)
@@ -157,13 +107,6 @@ def show_infomation(parent):
         "<b>Capstone Supervisor:</b><br>"
         "Dr Amirali Khodadadian Gostar"
     )
-
-    supervisor_label.setStyleSheet("""
-        QLabel {
-            color: #D8E4EE;
-            font-size: 13px;
-        }
-    """)
 
     dialog_layout.addWidget(supervisor_label)
 
@@ -189,13 +132,6 @@ def show_infomation(parent):
         "Lucas Di Guglielmo"
     )
 
-    members_label.setStyleSheet("""
-        QLabel {
-            color: #D8E4EE;
-            font-size: 13px;
-        }
-    """)
-
     dialog_layout.addWidget(members_label)
 
     dialog_layout.addStretch()
@@ -211,10 +147,6 @@ def show_infomation(parent):
     )
 
     dialog_layout.addWidget(close_button)
-
-    # ========================================================
-    # SHOW DIALOG
-    # ========================================================
 
     info_dialog.exec()
 
@@ -276,11 +208,9 @@ class DeltaUI(QMainWindow):
         )
 
         title_label.setStyleSheet("""
-            QLabel {
-                font-size: 32px;
-                font-weight: bold;
-                color: #FFFFFF;
-            }
+            font-size: 32px;
+            font-weight: bold;
+            color: black;
         """)
 
         self.info_button = QPushButton(
@@ -328,10 +258,6 @@ class DeltaUI(QMainWindow):
 
         self.camera_label = QLabel(
             "Waiting for camera"
-        )
-
-        self.camera_label.setObjectName(
-            "displayArea"
         )
 
         self.camera_label.setAlignment(
@@ -533,13 +459,13 @@ class DeltaUI(QMainWindow):
             | Qt.AlignmentFlag.AlignVCenter
         )
 
+        # Red by default until mapping is connected
         self.mapping_status_label.setStyleSheet("""
             QLabel {
-                color: #E74C3C;
+                color: red;
                 font-size: 36px;
                 font-weight: bold;
                 padding-right: 6px;
-                background-color: transparent;
             }
         """)
 
@@ -553,10 +479,6 @@ class DeltaUI(QMainWindow):
 
         self.map_label = QLabel(
             "LIVE MAP"
-        )
-
-        self.map_label.setObjectName(
-            "displayArea"
         )
 
         self.map_label.setAlignment(
@@ -730,7 +652,7 @@ class DeltaUI(QMainWindow):
             5
         )
 
-        # Controls / Recording
+        # Controls and recording
         top_layout.addLayout(
             control_panel_layout,
             1
@@ -747,163 +669,33 @@ class DeltaUI(QMainWindow):
         )
 
         # ====================================================
-        # NAVY BLUE UI THEME
+        # PLAIN WHITE / LIGHT UI STYLING
         # ====================================================
 
         self.setStyleSheet("""
-
-            /* ==============================================
-               MAIN WINDOW
-               ============================================== */
-
-            QMainWindow {
-                background-color: #0B1F33;
-            }
-
-            QWidget {
-                color: #E8EEF4;
-                font-size: 13px;
-            }
-
-
-            /* ==============================================
-               PANELS
-               ============================================== */
-
             QGroupBox {
-                background-color: #132A44;
-
-                border: 1px solid #3E5871;
-                border-radius: 7px;
-
-                margin-top: 12px;
+                border: 1px solid #888;
+                border-radius: 5px;
+                margin-top: 10px;
                 padding: 10px;
-
-                font-weight: bold;
-                color: #FFFFFF;
             }
 
             QGroupBox::title {
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
-
                 top: 5px;
                 left: 10px;
-
-                padding: 0 6px;
-
-                color: #FFFFFF;
-                background-color: #132A44;
+                padding: 0 5px;
             }
-
-
-            /* ==============================================
-               CAMERA / MAP DISPLAY
-               ============================================== */
-
-            QLabel#displayArea {
-                background-color: #081725;
-
-                color: #8295A8;
-
-                border: 1px solid #304A62;
-                border-radius: 5px;
-
-                font-weight: normal;
-            }
-
-
-            /* ==============================================
-               BUTTONS
-               ============================================== */
 
             QPushButton {
-                background-color: #234A6F;
-
-                color: #FFFFFF;
-
-                border: 1px solid #52789C;
-                border-radius: 5px;
-
                 min-height: 32px;
-
                 padding: 3px 6px;
             }
 
-            QPushButton:hover {
-                background-color: #2E5D88;
-
-                border: 1px solid #75A3CC;
-            }
-
-            QPushButton:pressed {
-                background-color: #183A59;
-            }
-
-            QPushButton:disabled {
-                background-color: #1A3045;
-
-                color: #71869A;
-
-                border: 1px solid #30465A;
-            }
-
-
-            /* ==============================================
-               TEXT INPUTS
-               ============================================== */
-
             QLineEdit {
-                background-color: #0E2236;
-
-                color: #FFFFFF;
-
-                border: 1px solid #456580;
-                border-radius: 4px;
-
                 min-height: 26px;
-
-                padding-left: 6px;
-                padding-right: 6px;
-
-                selection-background-color: #2E5D88;
             }
-
-            QLineEdit:focus {
-                border: 1px solid #76A9D4;
-            }
-
-
-            /* ==============================================
-               LOG WINDOW
-               ============================================== */
-
-            QPlainTextEdit {
-                background-color: #081725;
-
-                color: #D8E4EE;
-
-                border: 1px solid #3E5871;
-                border-radius: 4px;
-
-                padding: 5px;
-            }
-
-
-            /* ==============================================
-               TOOLTIPS
-               ============================================== */
-
-            QToolTip {
-                background-color: #132A44;
-
-                color: #FFFFFF;
-
-                border: 1px solid #52789C;
-
-                padding: 4px;
-            }
-
         """)
 
         # ====================================================
@@ -1111,11 +903,10 @@ class DeltaUI(QMainWindow):
 
             self.mapping_status_label.setStyleSheet("""
                 QLabel {
-                    color: #2ECC71;
+                    color: green;
                     font-size: 36px;
                     font-weight: bold;
                     padding-right: 6px;
-                    background-color: transparent;
                 }
             """)
 
@@ -1125,15 +916,14 @@ class DeltaUI(QMainWindow):
 
             self.mapping_status_label.setStyleSheet("""
                 QLabel {
-                    color: #E74C3C;
+                    color: red;
                     font-size: 36px;
                     font-weight: bold;
                     padding-right: 6px;
-                    background-color: transparent;
                 }
             """)
 
-        # Detailed information available on hover
+        # Detailed mapping information when hovering over light
 
         self.mapping_status_label.setToolTip(
             f"Mapping: {mapping_state}\n"
