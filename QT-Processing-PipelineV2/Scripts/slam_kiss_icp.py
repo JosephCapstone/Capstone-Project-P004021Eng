@@ -86,6 +86,21 @@ voxel_size and max_points_per_voxel) that is never pruned. Output
 density per voxel therefore follows the same rules as the default path.
 Without --map-max-range, the output is unchanged (the local map).
 UNVERIFIED against a real capture - tested on synthetic frames only.
+
+--map-max-horizontal / --map-max-vertical (added 2026-09-23): the same
+saved-map-only crop as --map-max-range, but split into a horizontal
+distance (sqrt(dx^2 + dy^2)) and a vertical distance (|dz|) from the
+sensor, so an open area can be cut short horizontally without losing a
+high ceiling (or the reverse). Measured in the MAP frame, relative to
+the sensor's position at that frame: the offset is the frame point
+rotated by the frame's pose (translation removed). The map frame is
+kiss-icp's first-frame sensor frame, so "vertical" means the sensor's
+up axis at the START of the scan - robot pitch or roll during the scan
+does not tilt the limit, but a sensor that was already tilted at the
+start does (Stage 2 levels the map afterwards, not this crop). Any
+combination of the three limits can be given; a point must pass every
+limit that is set. Any of the three switches on the global-map path.
+UNVERIFIED against a real capture - tested on synthetic frames only.
 """
 
 import argparse
@@ -184,11 +199,23 @@ def main():
                               "from the SAVED map only. Registration still uses the config's "
                               "data.max_range. Builds an unpruned global map instead of "
                               "saving kiss-icp's local map - see the module docstring.")
+    parser.add_argument("--map-max-horizontal", type=float, default=None,
+                         help="Remove points whose HORIZONTAL distance from the sensor "
+                              "(meters, map frame) is more than this, from the saved map only.")
+    parser.add_argument("--map-max-vertical", type=float, default=None,
+                         help="Remove points whose VERTICAL distance from the sensor "
+                              "(meters, map frame, above or below) is more than this, from "
+                              "the saved map only.")
     args = parser.parse_args()
 
-    if args.map_max_range is not None and args.map_max_range <= 0:
-        print("ERROR: --map-max-range must be greater than 0.")
-        return 1
+    for flag, value in (("--map-max-range", args.map_max_range),
+                        ("--map-max-horizontal", args.map_max_horizontal),
+                        ("--map-max-vertical", args.map_max_vertical)):
+        if value is not None and value <= 0:
+            print(f"ERROR: {flag} must be greater than 0.")
+            return 1
+    use_global_map = any(v is not None for v in (
+        args.map_max_range, args.map_max_horizontal, args.map_max_vertical))
 
     try:
         from kiss_icp.config import load_config
@@ -245,10 +272,10 @@ def main():
     odometry = KissICP(config=config)
 
     global_map = None
-    if args.map_max_range is not None:
+    if use_global_map:
         from kiss_icp.mapping import VoxelHashMap
         from kiss_icp.voxelization import voxel_down_sample
-        if args.map_max_range > config.data.max_range:
+        if args.map_max_range is not None and args.map_max_range > config.data.max_range:
             print(f"  NOTE: --map-max-range ({args.map_max_range} m) is larger than the "
                   f"config's data.max_range ({config.data.max_range} m). Each frame is "
                   f"already cropped to data.max_range before this step, so the "
@@ -260,8 +287,15 @@ def main():
             voxel_size=config.mapping.voxel_size,
             max_distance=1.0e9,
             max_points_per_voxel=config.mapping.max_points_per_voxel)
-        print(f"  Map max range: {args.map_max_range} m (saved map only - registration "
-              f"still uses data.max_range = {config.data.max_range} m)")
+        limits = []
+        if args.map_max_range is not None:
+            limits.append(f"range {args.map_max_range} m")
+        if args.map_max_horizontal is not None:
+            limits.append(f"horizontal {args.map_max_horizontal} m")
+        if args.map_max_vertical is not None:
+            limits.append(f"vertical {args.map_max_vertical} m")
+        print(f"  Map limits: {', '.join(limits)} (saved map only - registration still "
+              f"uses data.max_range = {config.data.max_range} m)")
 
     print("Running odometry...")
     report_every = max(1, n_frames // 20)
@@ -272,13 +306,20 @@ def main():
         frame, _source = odometry.register_frame(raw_frame, timestamps)
         if global_map is not None:
             down = voxel_down_sample(frame, config.mapping.voxel_size * 0.5)
-            in_range = np.linalg.norm(down, axis=1) <= args.map_max_range
-            keep = down[in_range]
+            pose = odometry.last_pose
+            # Offset from the sensor, in map-frame axes (see docstring).
+            offset = down @ pose[:3, :3].T
+            in_range = np.ones(len(down), dtype=bool)
+            if args.map_max_range is not None:
+                in_range &= np.linalg.norm(down, axis=1) <= args.map_max_range
+            if args.map_max_horizontal is not None:
+                in_range &= np.hypot(offset[:, 0], offset[:, 1]) <= args.map_max_horizontal
+            if args.map_max_vertical is not None:
+                in_range &= np.abs(offset[:, 2]) <= args.map_max_vertical
             kept_points += int(in_range.sum())
             dropped_points += int((~in_range).sum())
-            if len(keep):
-                pose = odometry.last_pose
-                world = keep @ pose[:3, :3].T + pose[:3, 3]
+            if in_range.any():
+                world = offset[in_range] + pose[:3, 3]
                 global_map.add_points(np.ascontiguousarray(world, dtype=np.float64))
         if (idx + 1) % report_every == 0 or idx == n_frames - 1:
             print(f"  {idx + 1}/{n_frames} frames processed")
@@ -286,7 +327,7 @@ def main():
     if global_map is not None:
         total = kept_points + dropped_points
         pct = (100.0 * dropped_points / total) if total else 0.0
-        print(f"Map max range removed {dropped_points} of {total} downsampled frame points "
+        print(f"Map limits removed {dropped_points} of {total} downsampled frame points "
               f"({pct:.1f}%) before they reached the saved map.")
         print("Extracting the accumulated map from the range-limited global map...")
         points = global_map.point_cloud()

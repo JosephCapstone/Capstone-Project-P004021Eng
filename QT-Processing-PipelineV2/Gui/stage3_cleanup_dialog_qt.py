@@ -36,7 +36,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from qt_stage_base import QStageDialog, QStagePanel
+from qt_stage_base import QStageDialog, QStagePanel, fmt_cm
 
 try:
     import project_manager as pm
@@ -223,7 +223,8 @@ class Stage3CleanupFieldsMixin:
                         resolved_state["extra_fields"]["sidecar"] = str(sidecar_path)
                     summary += (
                         f"\n=== REGISTRATION RMS ===\n"
-                        f"{rms:.6f} m - saved alongside this output, so Stage 5 (Diff) "
+                        f"{fmt_cm(round(rms, 6))} ({rms:.6f} m in project.json) - saved "
+                        f"alongside this output, so Stage 5 (Diff) "
                         f"can look it up automatically when you select this file as "
                         f"the comparison cloud.\n"
                         f"Note: a higher RMS from an informal/handheld capture (no "

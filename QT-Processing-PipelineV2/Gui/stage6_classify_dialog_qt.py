@@ -36,7 +36,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox
 
-from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR
+from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm
 
 try:
     import project_manager as pm
@@ -85,7 +85,8 @@ class Stage6ClassifyFieldsMixin:
         ])
         self.add_text_field("rms_multiplier", "Threshold multiplier:", default="2.5")
 
-        self.add_text_field("threshold", "Distance threshold (m):", default="0.02")
+        self.add_length_field("threshold", "Distance threshold (cm):", default_m="0.02",
+                              min_cm=0.05, max_cm=100)
         self.add_hint(
             "Points with |M3C2 distance| below this are treated as noise and dropped. Too "
             "low = false positives from scan noise; too high = real damage gets filtered "
@@ -136,12 +137,13 @@ class Stage6ClassifyFieldsMixin:
              "point density varies a lot by surface angle/distance from scanner", "hdbscan"),
         ], default="dbscan")
 
-        self.add_text_field(
-            "cluster_eps", "Cluster gap tolerance (m, DBSCAN only):", default="0.05")
+        self.add_length_field(
+            "cluster_eps", "Cluster gap tolerance (cm, DBSCAN only):", default_m="0.05",
+            min_cm=0.1, max_cm=200)
         self.add_hint(
             "Max gap between flagged points to still count as the same damage site. M3C2 "
             "core point spacing is usually finer than a full-cloud plane segmentation pass, "
-            "so this defaults tighter than Stage 4's own clustering (0.15) - check "
+            "so this defaults tighter than Stage 4's own cluster gap tolerance - check "
             "point_spacing.py if sites split or merge unexpectedly. Not used when the "
             "method above is HDBSCAN.")
 
@@ -197,9 +199,10 @@ class Stage6ClassifyFieldsMixin:
         self.fields["threshold"].set(f"{suggested_threshold:.6f}")
         QMessageBox.information(
             self, "Threshold suggested",
-            f"Registration RMS: {rms:.6f} m\n"
+            f"Registration RMS: {fmt_cm(round(rms, 6))}\n"
             f"Multiplier: {multiplier}x\n"
-            f"Suggested threshold: {suggested_threshold:.6f} m (filled in above)\n\n"
+            f"Suggested threshold: {fmt_cm(round(suggested_threshold, 6))} "
+            f"(filled in above)\n\n"
             "This is a starting point, not a guarantee - check the flagged percentage "
             "after running (0% or ~100% means it needs adjusting either direction).")
 
@@ -223,7 +226,7 @@ class Stage6ClassifyFieldsMixin:
             try:
                 threshold = float(threshold_text)
             except ValueError:
-                raise ValueError("Threshold must be a number, e.g. 0.02")
+                raise ValueError("Distance threshold must be a number in cm, for example 2.")
         elif use_uncertainty:
             threshold = None
         else:
@@ -237,7 +240,7 @@ class Stage6ClassifyFieldsMixin:
             cluster_min_samples = int(self.fields["cluster_min_samples"].get())
             min_cluster_size = int(self.fields["min_cluster_size"].get())
         except ValueError:
-            raise ValueError("Cluster gap tolerance must be a number; cluster density and "
+            raise ValueError("Cluster gap tolerance must be a number in cm; cluster density and "
                               "minimum damage site size must be whole numbers.")
 
         active_pipeline = self.get_active_pipeline_for_run()
@@ -253,12 +256,12 @@ class Stage6ClassifyFieldsMixin:
             mode_text = ("keep all points, flag field added" if keep_all
                          else "filtered to flagged points only")
             if use_uncertainty and threshold is not None:
-                threshold_text_out = (f"{threshold} m fixed floor, AND per-point "
+                threshold_text_out = (f"{fmt_cm(threshold)} fixed floor, AND per-point "
                                        f"uncertainty (a point must clear both)")
             elif use_uncertainty:
                 threshold_text_out = "per-point uncertainty (CloudCompare LOD95) only"
             else:
-                threshold_text_out = f"{threshold} m fixed"
+                threshold_text_out = f"{fmt_cm(threshold)} fixed"
             summary = (
                 "=== SUMMARY ===\n"
                 f"Input: {input_ply}\n"
@@ -292,7 +295,8 @@ class Stage6ClassifyFieldsMixin:
                         centroid = ", ".join(f"{v:.3f}" for v in c.get("centroid", []))
                         summary += (
                             f"  site {c.get('cluster_id')}: {c.get('point_count')} points, "
-                            f"centroid=({centroid}), max|d|={c.get('max_magnitude', 0):.4f}\n")
+                            f"centroid=({centroid}) m, "
+                            f"max|d|={fmt_cm(round(c.get('max_magnitude', 0), 4))}\n")
                     if not clusters:
                         summary += (
                             "No damage sites survived clustering - consider lowering the "

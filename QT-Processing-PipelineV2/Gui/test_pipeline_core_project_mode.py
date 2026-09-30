@@ -771,6 +771,18 @@ rosbag2_bagfile_information:
     check("config's own max_range recorded alongside it", kiss_params_3["max_range"] == 15.0)
     check("no --max-range override is passed (it would also prune the saved map)",
           "--max-range" not in cmd_kiss_mmr)
+    cmd_kiss_hv = core.build_kiss_icp_slam_command(
+        "slam_kiss_icp.py", "src.bag", "out.ply", config=str(mmr_config),
+        map_max_horizontal=6.0, map_max_vertical=2.0, pipeline=kiss_baseline)
+    kiss_params_4 = kiss_baseline.entry["stages"]["slam"]["params"]
+    check("--map-max-horizontal / --map-max-vertical on the KISS-ICP command",
+          cmd_kiss_hv[cmd_kiss_hv.index("--map-max-horizontal") + 1] == "6.0"
+          and cmd_kiss_hv[cmd_kiss_hv.index("--map-max-vertical") + 1] == "2.0")
+    check("horizontal/vertical recorded, range None",
+          kiss_params_4["map_max_horizontal"] == 6.0 and kiss_params_4["map_max_vertical"] == 2.0
+          and kiss_params_4["map_max_range"] is None)
+    check("no horizontal/vertical flags when not given", "--map-max-horizontal" not in cmd_kiss_mmr
+          and "--map-max-vertical" not in cmd_kiss_mmr)
     cmd_ouster_mmr = core.build_slam_command("src.pcap", 0.25, "out.ply", map_max_range=7.5)
     check("Ouster CLI: clip RANGE :7500mm between slam and save",
           cmd_ouster_mmr.index("slam") < cmd_ouster_mmr.index("clip") < cmd_ouster_mmr.index("save")

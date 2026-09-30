@@ -685,6 +685,7 @@ def read_kiss_icp_max_range(config_path):
 def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None,
                                  dataloader=None, topic=None, meta=None,
                                  voxel_size=None, min_range=None, map_max_range=None,
+                                 map_max_horizontal=None, map_max_vertical=None,
                                  pipeline=None):
     """
     Delegates to slam_kiss_icp.py - a second, genuinely different SLAM
@@ -748,6 +749,15 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
     also cut the saved map to a sphere around the robot's final position.
     Recorded in project mode as "map_max_range" (None = not used).
 
+    map_max_horizontal / map_max_vertical: optional, in meters - passed as
+    --map-max-horizontal / --map-max-vertical. The same saved-map-only
+    crop, split into horizontal and vertical distance from the sensor
+    (map frame - see slam_kiss_icp.py's docstring). KISS-ICP only: the
+    Ouster CLI backend's `clip` command works on the RANGE field, which
+    has no horizontal/vertical split. Can be combined with map_max_range;
+    a point must pass every limit given. Recorded as "map_max_horizontal"
+    and "map_max_vertical".
+
     dataloader/topic: only relevant for rosbag sources - topic selects
     which PointCloud2 topic to read if a bag has more than one (kiss-icp
     auto-selects if there's only one, so this is often unnecessary).
@@ -783,6 +793,8 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
             "min_range_overridden": min_range is not None,
             "max_range": read_kiss_icp_max_range(config),
             "map_max_range": map_max_range,
+            "map_max_horizontal": map_max_horizontal,
+            "map_max_vertical": map_max_vertical,
         })
 
     cmd = [sys.executable, str(kiss_icp_script),
@@ -802,6 +814,10 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
         cmd += ["--min-range", str(min_range)]
     if map_max_range is not None:
         cmd += ["--map-max-range", str(map_max_range)]
+    if map_max_horizontal is not None:
+        cmd += ["--map-max-horizontal", str(map_max_horizontal)]
+    if map_max_vertical is not None:
+        cmd += ["--map-max-vertical", str(map_max_vertical)]
     return cmd
 
 

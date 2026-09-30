@@ -55,7 +55,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QMessageBox, QFileDialog
 
-from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR
+from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm
 
 try:
     import project_manager as pm
@@ -133,7 +133,8 @@ class Stage8ExportFieldsMixin:
             lambda: pm.list_side_candidates(self.pipeline.project,
                                             self.pipeline.entry["comparison"]))
         radius_default = _default_damage_detail_radius(pipeline)
-        self.add_text_field("damage_detail_radius", "Radius (m):", default=radius_default)
+        self.add_length_field("damage_detail_radius", "Radius (cm):", default_m=radius_default,
+                              min_cm=0.1, max_cm=200)
         self.register_auto_default("damage_detail_radius", _default_damage_detail_radius)
         self.add_hint(
             "Radius: how far around each flagged point to pull real geometry from the "
@@ -171,7 +172,7 @@ class Stage8ExportFieldsMixin:
 
         self.add_checkbox(
             "downsample", "Downsample point cloud layers (reduces file size / viewer load)")
-        self.add_text_field("voxel_size", "Voxel size:", default="")
+        self.add_length_field("voxel_size", "Voxel size (cm):", min_cm=0.1, max_cm=100)
         self.add_hint(
             "Off by default. Keeps one representative point per voxel cell - removes "
             "redundant near-duplicate points from overlapping scan passes, not real detail, "
@@ -199,7 +200,8 @@ class Stage8ExportFieldsMixin:
             try:
                 voxel_size = float(self.fields["voxel_size"].get())
             except ValueError:
-                raise ValueError("Voxel size must be a number when downsampling is checked.")
+                raise ValueError("Voxel size must be a number in cm when downsampling is "
+                                 "checked.")
 
         active_pipeline = self.get_active_pipeline_for_run()
         cmd = core.build_export_command(script, baseline, change, output,
@@ -212,7 +214,7 @@ class Stage8ExportFieldsMixin:
             f"Baseline used: {baseline}\n"
             f"Change-highlight used: {change}\n"
             + (f"Damage detail used: {detail}\n" if detail else "No damage detail layer.\n")
-            + (f"Downsampling: voxel size {voxel_size}\n" if voxel_size else
+            + (f"Downsampling: voxel size {fmt_cm(voxel_size)}\n" if voxel_size else
                "No downsampling.\n")
             + f"Script: {script}\n"
             f"Saved to: {output}\n"
@@ -255,10 +257,12 @@ class Stage8ExportFieldsMixin:
         try:
             radius = float(self.fields["damage_detail_radius"].get())
         except ValueError:
-            QMessageBox.critical(self, "No radius", "Enter the radius as a number first.")
+            QMessageBox.critical(self, "No radius", "Enter the radius in cm first.")
             return
         if radius <= 0:
             QMessageBox.critical(self, "Radius not valid", "The radius must be more than 0.")
+            return
+        if not self._check_length_plausibility(keys=("damage_detail_radius",)):
             return
 
         script_path = SCRIPTS_DIR / "extract_damage_detail.py"
@@ -300,8 +304,8 @@ class Stage8ExportFieldsMixin:
                     "changed.")
                 return
             self.fields["detail"].set(save_path)
-            QMessageBox.information(
-                self, "Damage detail extracted",
+            self._show_success(
+                "Damage detail extracted",
                 f"Saved to:\n{save_path}\n\n"
                 + ("This is a project run. The app named the file and put it in the "
                    "export folder of this diff.\n\n" if auto_named else "")

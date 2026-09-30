@@ -26,7 +26,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR
+from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm
 
 try:
     import project_manager as pm
@@ -80,12 +80,12 @@ class Stage7SurfaceFieldsMixin:
             "lowest-density vertices removed as likely reconstruction artifacts (0 disables "
             "trimming and keeps the mesh watertight, at the cost of keeping spurious blobby "
             "geometry away from the real data).")
-        self.add_text_field(
-            "ball_radii", "[Ball Pivoting] Ball radii (comma-separated, optional):",
-            default="")
+        self.add_length_list_field(
+            "ball_radii", "[Ball Pivoting] Ball radii (cm, comma-separated, optional):",
+            min_cm=0.1, max_cm=200)
         self.add_hint(
-            "[Ball Pivoting only] e.g. '0.02,0.04,0.08', in the same units as the point "
-            "cloud. Leave blank to auto-estimate from the cloud's own point spacing.")
+            "[Ball Pivoting only] For example '2,4,8' (cm). Leave blank to calculate the "
+            "radii from the point spacing of the cloud.")
         self.add_text_field(
             "carry_field", "Carry field (optional, e.g. 'scalar_M3C2_distance'):",
             default="scalar_M3C2_distance")
@@ -139,7 +139,8 @@ class Stage7SurfaceFieldsMixin:
             f"Method: {method}\n"
             + (f"Octree depth: {depth}, density trim: {density_trim_percentile}%\n"
                if method == "poisson" else
-               f"Ball radii: {ball_radii or 'auto-estimated'}\n")
+               f"Ball radii: "
+               f"{', '.join(fmt_cm(r) for r in ball_radii.split(',')) if ball_radii else 'auto-estimated'}\n")
             + (f"Carrying field: {carry_field}\n" if carry_field else
                "No field carried through.\n")
             + f"Saved to: {output}\n\n"

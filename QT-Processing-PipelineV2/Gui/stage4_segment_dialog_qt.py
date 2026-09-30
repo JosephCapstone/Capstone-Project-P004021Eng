@@ -34,7 +34,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR
+from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm
 
 try:
     import project_manager as pm
@@ -121,7 +121,8 @@ class Stage4SegmentFieldsMixin:
         self.add_checkbox(
             "envelope_filter",
             "Flag unclassified points that sit outside the room as junk", default=True)
-        self.add_text_field("envelope_margin", "Envelope margin (m):", default="0.15")
+        self.add_length_field("envelope_margin", "Envelope margin (cm):", default_m="0.15",
+                              min_cm=0.5, max_cm=200)
         self.add_checkbox(
             "write_envelope_filtered",
             "Also write a separate copy with outside-envelope points removed", default=False)
@@ -142,16 +143,17 @@ class Stage4SegmentFieldsMixin:
             "downstream use without re-filtering by hand.")
 
         self.add_preset_selector("Distance threshold preset:", [
-            ("Default (0.05m, 20 max planes) - tested combo for a full room/compartment scan",
+            ("Default (5 cm, 20 max planes) - tested combo for a full room/compartment scan",
              {"distance_threshold": "0.05", "max_planes": "20",
               "min_inlier_fraction": "0.003", "cluster_eps": "0.5"}),
-            ("Tight (0.02m) - matches level_cloud.py's own script default",
+            ("Tight (2 cm) - matches level_cloud.py's own script default",
              {"distance_threshold": "0.02"}),
-            ("Medium (0.1m) - try if a real wall/floor doesn't survive as its own plane",
+            ("Medium (10 cm) - try if a real wall/floor doesn't survive as its own plane",
              {"distance_threshold": "0.1"}),
-            ("Loose (0.25m)", {"distance_threshold": "0.25"}),
+            ("Loose (25 cm)", {"distance_threshold": "0.25"}),
         ])
-        self.add_text_field("distance_threshold", "Distance threshold (m):", default="0.05")
+        self.add_length_field("distance_threshold", "Distance threshold (cm):", default_m="0.05",
+                              min_cm=0.1, max_cm=200)
         self.add_hint(
             "RANSAC plane-fit tolerance - same idea as Stage 2 (Level)'s own field. Roughly "
             "match or exceed the voxel size used in Stage 1 (SLAM), for the same reason "
@@ -165,7 +167,8 @@ class Stage4SegmentFieldsMixin:
             "accepted at all. Raise this (e.g. 0.015) if too many small, spurious surfaces "
             "are getting accepted instead of falling into 'unclassified'.")
         self.add_text_field("horizontal_threshold", "Horizontal threshold:", default="0.7")
-        self.add_text_field("max_horizontal_z_span", "Max horizontal Z span (m):", default="0.3")
+        self.add_length_field("max_horizontal_z_span", "Max horizontal Z span (cm):",
+                              default_m="0.3", min_cm=0.5, max_cm=500)
         self.add_hint(
             "Horizontal threshold: how close to perfectly flat (|normal.z|, 1.0 = exactly "
             "horizontal) a plane must be to count as floor/ceiling rather than a wall. Max "
@@ -177,7 +180,8 @@ class Stage4SegmentFieldsMixin:
         self.add_checkbox(
             "cluster_filter", "Filter each surface to its largest connected cluster",
             default=True)
-        self.add_text_field("cluster_eps", "Cluster gap tolerance (m):", default="0.5")
+        self.add_length_field("cluster_eps", "Cluster gap tolerance (cm):", default_m="0.5",
+                              min_cm=0.5, max_cm=500)
         self.add_text_field("cluster_min_points", "Cluster min points:", default="20")
         self.add_hint(
             "RANSAC's inlier test only checks distance to the infinite plane equation, not "
@@ -194,7 +198,8 @@ class Stage4SegmentFieldsMixin:
         self.add_text_field(
             "merge_normal_cos", "Merge normal similarity (1.0 = exactly parallel):",
             default="0.98")
-        self.add_text_field("merge_distance", "Merge plane distance (m):", default="0.1")
+        self.add_length_field("merge_distance", "Merge plane distance (cm):", default_m="0.1",
+                              min_cm=0.1, max_cm=200)
         self.add_hint(
             "Confirmed on real data: a wall obstructed mid-span by clutter can get "
             "detected as two separate, duplicate-looking surfaces instead of one - and a "
@@ -259,7 +264,7 @@ class Stage4SegmentFieldsMixin:
                 "=== SUMMARY ===\n"
                 f"Input: {input_ply}\n"
                 f"Output folder: {output_dir}\n"
-                f"Distance threshold: {distance_threshold} m, max planes: {max_planes}\n"
+                f"Distance threshold: {fmt_cm(distance_threshold)}, max planes: {max_planes}\n"
             )
 
             classified_path, extra_fields = core.resolve_segment_output(output_dir)

@@ -37,11 +37,15 @@ def check(label, condition):
         raise AssertionError(label)
 
 
-# Record message boxes instead of blocking on them. question() answers Yes.
+# Record message boxes instead of blocking on them. question() answers
+# QUESTION_ANSWER[0] (Yes by default).
+QUESTION_ANSWER = [QMessageBox.Yes]
+
+
 def _record(kind):
     def fn(*args, **kwargs):
         DIALOGS.append((kind, args[1] if len(args) > 1 else "", args[2] if len(args) > 2 else ""))
-        return QMessageBox.Yes
+        return QUESTION_ANSWER[0] if kind == "question" else QMessageBox.Yes
     return staticmethod(fn)
 
 
@@ -54,6 +58,10 @@ import pipeline_applet_qt_template as main_window  # noqa: E402
 import pipeline_core as core  # noqa: E402
 import project_manager as pm  # noqa: E402
 import qt_stage_base  # noqa: E402
+
+# Success popups (green tick) go through one helper - record them too.
+qt_stage_base.show_success_message = (
+    lambda parent, title, text: DIALOGS.append(("success", title, text)))
 
 
 def pump(condition, timeout=20.0):
@@ -169,6 +177,9 @@ level = project.baseline_handle().entry["stages"]["level"]
 check("stage recorded complete", level.get("status") == "complete")
 check("recorded output is _001", level.get("output", "").endswith("_level_001.ply"))
 check("output field moved on to _002", p2.fields["output"].get().endswith("_level_002.ply"))
+check("Stage Report shown with the success (tick) popup",
+      any(k == "success" and t == "Stage Report" for k, t, _m in DIALOGS))
+check("the tick icon draws", not qt_stage_base._tick_pixmap(48, 1.0).isNull())
 
 print("\n=== Item 1: a project-record failure still releases the lock ===")
 real_finish = core.finish_stage
@@ -258,6 +269,36 @@ DIALOGS.clear()
 p1._on_run_clicked()
 check("a negative value is refused", DIALOGS and "greater than 0" in DIALOGS[-1][2])
 
+print("\n=== Horizontal / vertical map limits (KISS-ICP only) ===")
+p1.fields["backend"].set("kiss_icp")
+p1.fields["map_max_range"].set("")
+p1.fields["kiss_icp_map_max_horizontal"].set("8")
+p1.fields["kiss_icp_map_max_vertical"].set("2.5")
+p1.fields["output"].set("")
+p1._refresh_auto_defaults(only_empty=True)
+cmd, report, _info = p1._build_run()
+check("--map-max-horizontal 8.0 on the KISS-ICP command",
+      cmd[cmd.index("--map-max-horizontal") + 1] == "8.0")
+check("--map-max-vertical 2.5 on the KISS-ICP command",
+      cmd[cmd.index("--map-max-vertical") + 1] == "2.5")
+slam_params = project.baseline_handle().entry["stages"]["slam"]["params"]
+check("both recorded in project params",
+      slam_params["map_max_horizontal"] == 8.0 and slam_params["map_max_vertical"] == 2.5)
+check("report names both limits", "horizontal distance: 8.0 m" in report
+      and "vertical distance: 2.5 m" in report)
+p1.fields["kiss_icp_map_max_vertical"].set("0")
+DIALOGS.clear()
+p1._on_run_clicked()
+check("a zero vertical limit is refused", DIALOGS and "greater than 0" in DIALOGS[-1][2])
+p1.fields["backend"].set("ouster")
+p1.fields["output"].set("")
+p1._refresh_auto_defaults(only_empty=True)
+cmd, _report, _info = p1._build_run()
+check("Ouster CLI ignores the KISS-only limits", "clip" not in cmd
+      and "--map-max-horizontal" not in cmd)
+p1.fields["kiss_icp_map_max_horizontal"].set("")
+p1.fields["kiss_icp_map_max_vertical"].set("")
+
 print("\n=== Item 5: Extract Damage Detail radius pre-fill ===")
 params_file = tmp / "m3c2_params.txt"
 core.generate_m3c2_params_file(params_file, 0.0425, 0.02125, 0.085, 0.004)
@@ -269,8 +310,9 @@ check("build_diff_command records params.normal_scale",
       diff.entry["stages"]["diff"]["params"]["normal_scale"] == 0.0425)
 win._on_diff_added(diff_id)
 p8 = win._stage_pages["Stage 8: Export"]
-check("radius pre-filled from the recorded normal scale",
-      p8.fields["damage_detail_radius"].get() == "0.0425")
+check("radius pre-filled from the recorded normal scale, shown in cm",
+      p8.fields["damage_detail_radius"].widget.text() == "4.25")
+check("radius field still returns metres", p8.fields["damage_detail_radius"].get() == "0.0425")
 
 print("\n=== Item 5: Extract Damage Detail runs for real ===")
 flagged = tmp / "flagged.ply"
@@ -292,6 +334,8 @@ finally:
     stage8.SCRIPTS_DIR = real_scripts_dir
 detail = p8.fields["detail"].get()
 check("detail field filled", detail.endswith(".ply") and Path(detail).exists())
+check("extract success shown with the tick popup",
+      any(k == "success" and t == "Damage detail extracted" for k, t, _m in DIALOGS))
 check("detail saved in the diff's export folder",
       Path(detail).resolve().is_relative_to(diff.root.resolve()))
 
@@ -313,5 +357,56 @@ failed_dlg.compartment_edit.setText("comp_02")  # same name and date - folder ex
 failed_dlg.source_edit.setText(str(raw2))
 failed_dlg._create()
 check("failure reported", pump(lambda: any(k == "critical" for k, _t, _m in DIALOGS)))
+
+print("\n=== Centimetre fields: display cm, return metres ===")
+ref = win._stage_pages["Stage 4: Segment"].fields["distance_threshold"]
+check("Stage 4 default 0.05 m shows as 5", ref.widget.text() == "5")
+check("get() returns metres", ref.get() == "0.05")
+ref.widget.setText("2.5")
+check("typed 2.5 cm returns 0.025 m", ref.get() == "0.025")
+ref.set("0.05")
+check("blank stays blank", qt_stage_base.LengthFieldRef(
+    type(ref.widget)()).get() == "")
+p5 = win._stage_pages["Stage 5: Diff"]
+p5.fields["registration_rms"].set("0.0184")
+check("Stage 5 RMS set in metres shows 1.84 cm",
+      p5.fields["registration_rms"].widget.text() == "1.84")
+p7 = win._stage_pages["Stage 7: Surface"]
+p7.fields["ball_radii"].widget.setText("2, 4,8")
+check("Stage 7 ball radii '2, 4,8' cm -> '0.02,0.04,0.08' m",
+      p7.fields["ball_radii"].get() == "0.02,0.04,0.08")
+check("ranges stay in metres: map max range is a plain field",
+      not isinstance(p1.fields["map_max_range"], qt_stage_base.LengthFieldRef)
+      and not isinstance(p1.fields["kiss_icp_min_range"], qt_stage_base.LengthFieldRef))
+
+p1.fields["backend"].set("ouster")
+p1.fields["map_max_range"].set("")
+p1.fields["voxel_size"].widget.setText("25")
+p1.fields["source"].set(str(inp))
+p1.fields["output"].set("")
+p1._refresh_auto_defaults(only_empty=True)
+cmd, _report, _info = p1._build_run()
+check("Stage 1 voxel 25 cm reaches ouster-cli as 0.25",
+      cmd[cmd.index("--voxel-size") + 1] == "0.25")
+check("project records metres", project.baseline_handle().entry["stages"]["slam"]
+      ["params"]["voxel_size"] == 0.25)
+
+print("\n=== A metre value typed into a cm field asks first ===")
+p1.fields["voxel_size"].widget.setText("0.25")  # the likely mistake: 0.25 cm
+QUESTION_ANSWER[0] = QMessageBox.No
+DIALOGS.clear()
+p1._on_run_clicked()
+check("confirmation asked", any(k == "question" and t == "Check the length values"
+                                for k, t, _m in DIALOGS))
+check("answer No: nothing runs", not win._is_running)
+check("the message names the field and value",
+      any("Voxel size (cm): 0.25 cm" in m for _k, _t, m in DIALOGS))
+p1.fields["kiss_icp_voxel_size"].widget.setText("0.01")  # hidden: KISS section
+p1.fields["voxel_size"].widget.setText("25")
+DIALOGS.clear()
+check("a hidden section's field is not checked",
+      p1._check_length_plausibility() is True and not DIALOGS)
+p1.fields["kiss_icp_voxel_size"].widget.setText("")
+QUESTION_ANSWER[0] = QMessageBox.Yes
 
 print(f"\nAll {PASSED} checks passed.")

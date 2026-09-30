@@ -100,10 +100,21 @@ Some packages that the application uses do not support the newest Python version
    ```
 4. Wait until the installation is complete. This can take some minutes.
 5. Make sure that no red error text shows at the end.
+6. Make sure that PySide6 is installed. PySide6 makes the application window. Type this command and push Enter:
+   ```
+   python -c "import PySide6; print(PySide6.__version__)"
+   ```
+7. Make sure that the window shows a version number, for example `6.9.1`. The version must be 6.5 or newer.
+
+**NOTE:** The command in step 3 installs all of the packages in `requirements.txt`. PySide6 is one of these packages. If step 6 shows `ModuleNotFoundError: No module named 'PySide6'`, type this command and push Enter:
+```
+python -m pip install "PySide6>=6.5"
+```
+Then do steps 6 and 7 again.
 
 **NOTE:** `requirements.txt` sets `kiss-icp` to version 1.2.3. The Stage 1 script is tested with this version. Do not upgrade `kiss-icp` without a test.
 
-**NOTE:** If `open3d` does not install, go to Section 9 of the troubleshooting sheet.
+**NOTE:** If `open3d` does not install, go to Sections 8 and 9 of the troubleshooting sheet.
 
 ## 6. Install CloudCompare
 
@@ -206,7 +217,8 @@ A stage can run for a long time. For example, Stage 4 (Segment) can run for many
 | Item | Check command | Correct result |
 |---|---|---|
 | Python | `python --version` | A version in the 3.11 series or the 3.12 series |
-| Python packages | `python -m pip show PySide6 open3d kiss-icp` | Details for each package |
+| PySide6 | `python -c "import PySide6; print(PySide6.__version__)"` | Version 6.5 or newer |
+| Other Python packages | `python -m pip show open3d kiss-icp` | Details for each package |
 | Ouster CLI | `where ouster-cli` | A path to `ouster-cli.exe` |
 | CloudCompare | `where CloudCompare` | A path to `CloudCompare.exe` |
 | Self-tests | `python test_qt_smoke.py` (in `gui`) | `All ... checks passed` |

@@ -22,7 +22,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR
+from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm
 
 try:
     import project_manager as pm
@@ -75,28 +75,28 @@ class Stage2LevelFieldsMixin:
             "KISS-ICP" if slam_params.get("backend") == "kiss_icp" else "Ouster CLI")
 
         self.add_preset_selector("Distance threshold preset:", [
-            ("Tight (0.02m) - script default, needs fine/dense data",
+            ("Tight (2 cm) - script default, needs fine/dense data",
              {"distance_threshold": "0.02"}),
-            ("Medium (0.1m) - reasonable if Stage 1 voxel size was ~0.1-0.15m",
+            ("Medium (10 cm) - reasonable if Stage 1 voxel size was ~10-15 cm",
              {"distance_threshold": "0.1"}),
-            ("Loose (0.25m) - try if 'no planes found', or Stage 1 voxel size was ~0.25m+",
+            ("Loose (25 cm) - try if 'no planes found', or Stage 1 voxel size was ~25 cm+",
              {"distance_threshold": "0.25"}),
         ])
         distance_threshold_default = (
             f"{stage1_voxel_size}" if stage1_voxel_size is not None else "0.02")
-        self.add_text_field("distance_threshold", "Distance threshold (m):",
-                             default=distance_threshold_default)
+        self.add_length_field("distance_threshold", "Distance threshold (cm):",
+                              default_m=distance_threshold_default, min_cm=0.1, max_cm=200)
         if stage1_voxel_size is not None:
             voxel_source_note = (
                 f" This pipeline's Stage 1 ({stage1_backend_label}) used voxel_size = "
-                f"{stage1_voxel_size} m, recorded in project.json - the field above "
+                f"{fmt_cm(stage1_voxel_size)}, recorded in project.json - the field above "
                 f"starts there, matching it.")
         elif pipeline is not None and slam_params.get("backend") == "kiss_icp":
             voxel_source_note = (
                 " This pipeline's Stage 1 used KISS-ICP with no voxel_size found (no "
                 "config given, or none read from it) - kiss-icp's own auto-derived "
                 "default applied, so there's nothing specific to match here; the field "
-                "above kept the script's own 0.02 default.")
+                "above kept the script's own 2 cm default.")
         else:
             voxel_source_note = ""
         self.add_hint("RANSAC plane-fit tolerance. If you get 'no planes found at all', "
@@ -136,7 +136,7 @@ class Stage2LevelFieldsMixin:
             min_inlier_fraction = float(self.fields["min_inlier_fraction"].get())
             horizontal_threshold = float(self.fields["horizontal_threshold"].get())
         except ValueError:
-            raise ValueError("Distance threshold/min plane size/horizontal threshold "
+            raise ValueError("Distance threshold (cm)/min plane size/horizontal threshold "
                               "must be numbers, max planes must be a whole number.")
         active_pipeline = self.get_active_pipeline_for_run()
         finish_info = {"pipeline": active_pipeline, "stage_name": "level", "output": output}
@@ -151,7 +151,7 @@ class Stage2LevelFieldsMixin:
             "=== SUMMARY ===\n"
             f"Input: {input_ply}\n"
             f"Saved to: {output}\n"
-            f"Distance threshold: {distance_threshold} m\n"
+            f"Distance threshold: {fmt_cm(distance_threshold)}\n"
             f"Max planes searched: {max_planes}\n"
             f"Min plane size: {min_inlier_fraction * 100:.1f}% of all points\n"
             f"Horizontal threshold: {horizontal_threshold}\n\n"

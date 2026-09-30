@@ -60,7 +60,8 @@ for that, the same way pipeline_applet.py's dialog functions do).
 """
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QObject, Signal
+from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRectF
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QCheckBox, QRadioButton, QButtonGroup, QComboBox, QWidget, QScrollArea,
@@ -89,6 +90,59 @@ except ImportError:
 # instead.
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
+
+
+def _same_value(a, b):
+    """True when two field strings hold the same value - numerically if
+    both parse (a cm field round-trips 0.05 as '0.05' but a resolver may
+    give '0.050'), else as plain strings."""
+    fa, fb = _parse_float(a), _parse_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= 1e-12 * max(1.0, abs(fa), abs(fb))
+    return str(a).strip() == str(b).strip()
+
+
+def _tick_pixmap(size=48, device_pixel_ratio=1.0):
+    """A green circle with a white tick, drawn with QPainter so it looks
+    the same in every Qt style (the built-in style icons differ between
+    Windows styles, and QMessageBox has no standard tick icon)."""
+    pixmap = QPixmap(int(size * device_pixel_ratio), int(size * device_pixel_ratio))
+    pixmap.setDevicePixelRatio(device_pixel_ratio)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor("#2e7d32"))
+    painter.drawEllipse(QRectF(2, 2, size - 4, size - 4))
+    pen = QPen(QColor("white"))
+    pen.setWidthF(size * 0.1)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    path = QPainterPath()
+    path.moveTo(size * 0.28, size * 0.52)
+    path.lineTo(size * 0.44, size * 0.67)
+    path.lineTo(size * 0.72, size * 0.36)
+    painter.drawPath(path)
+    painter.end()
+    return pixmap
+
+
+def show_success_message(parent, title, text):
+    """QMessageBox.information() with a green tick instead of the
+    information icon - for the popups that report a completed step
+    (Stage Report after a successful run, and the successful end of a
+    helper step: decode, Generate Params File, Extract Damage Detail).
+    Called through StageFieldsMixin._show_success(), which looks this
+    name up at call time, so tests can replace it."""
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setText(text)
+    ratio = parent.devicePixelRatioF() if parent is not None else 1.0
+    box.setIconPixmap(_tick_pixmap(48, ratio))
+    box.setStandardButtons(QMessageBox.Ok)
+    box.exec()
 
 
 class RunCheckError(ValueError):
@@ -333,6 +387,103 @@ class LineEditRef:
         self.widget.setText(str(value))
 
 
+# ---------------------------------------------------------------------------
+# Centimetre display for small lengths (added 2026-09-23)
+#
+# Rule: the GUI SHOWS centimetres, everything else stays in METRES -
+# scripts, KISS-ICP YAML, project.json, the M3C2 params file,
+# CloudCompare, USD. The conversion happens in exactly one place: the
+# field ref. LengthFieldRef.get() returns METRES (as a string), and
+# LengthFieldRef.set() takes METRES. So every stage's _build_run(),
+# preset dict, pre-fill and project record keeps working in metres
+# unchanged - only the widget text is in cm.
+#
+# Ranges (Stage 1 min range, map max range) deliberately stay plain
+# metre fields - decided in chat: "800 cm" reads worse than "8 m".
+# ---------------------------------------------------------------------------
+
+def _parse_float(text):
+    try:
+        return float(str(text).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def format_cm_text(meters):
+    """Metres (number or numeric string) -> centimetre text for a field,
+    e.g. 0.25 -> "25", 0.0425 -> "4.25". Non-numeric input is returned
+    unchanged (so a bad value stays visible instead of disappearing)."""
+    value = _parse_float(meters)
+    if value is None:
+        return "" if meters is None else str(meters)
+    return f"{round(value * 100.0, 6):g}"
+
+
+def fmt_cm(meters):
+    """For reports and labels: 0.25 -> "25 cm". None -> "unknown"."""
+    if meters is None:
+        return "unknown"
+    return f"{format_cm_text(meters)} cm"
+
+
+def _meters_text_from_cm(text):
+    value = _parse_float(text)
+    if value is None:
+        return str(text)  # blank or not a number - the caller's float() reports it
+    return f"{value / 100.0:.10g}"
+
+
+class LengthFieldRef(LineEditRef):
+    """A QLineEdit that shows centimetres. get() returns METRES as a
+    string ("" if blank; the raw text if not a number, so the caller's
+    own float() raises its normal ValueError). set() takes METRES.
+
+    min_cm/max_cm: plausibility range for _check_length_plausibility().
+    Values outside it get a confirmation question before a run - the
+    main risk of the cm change is someone typing a metre value (0.05)
+    into a cm field, which means 0.5 mm."""
+
+    def __init__(self, widget, min_cm=0.1, max_cm=500.0):
+        super().__init__(widget)
+        self.min_cm = min_cm
+        self.max_cm = max_cm
+
+    def get(self):
+        text = self.widget.text().strip()
+        return _meters_text_from_cm(text) if text else ""
+
+    def set(self, value):
+        self.widget.setText(format_cm_text(value))
+
+    def implausible_values_cm(self):
+        text = self.widget.text().strip()
+        value = _parse_float(text)
+        if not text or value is None:
+            return []
+        return [value] if (value < self.min_cm or value > self.max_cm) else []
+
+
+class LengthListFieldRef(LengthFieldRef):
+    """Comma-separated list of lengths (Stage 7 ball radii). Same
+    contract as LengthFieldRef, applied to each item."""
+
+    def get(self):
+        text = self.widget.text().strip()
+        if not text:
+            return ""
+        return ",".join(_meters_text_from_cm(part) for part in text.split(","))
+
+    def set(self, value):
+        text = str(value or "").strip()
+        self.widget.setText(
+            ",".join(format_cm_text(part) for part in text.split(",")) if text else "")
+
+    def implausible_values_cm(self):
+        values = [_parse_float(part) for part in self.widget.text().split(",")]
+        return [v for v in values
+                if v is not None and (v < self.min_cm or v > self.max_cm)]
+
+
 class CheckBoxRef:
     def __init__(self, widget: QCheckBox):
         self.widget = widget
@@ -453,6 +604,67 @@ class StageFieldsMixin:
         self.form.addLayout(row)
         self.fields[key] = LineEditRef(edit)
         return edit
+
+    def add_length_field(self, key, label, default_m="", min_cm=0.1, max_cm=500.0,
+                         ref_cls=None):
+        """A length field shown in CENTIMETRES. `label` should say (cm).
+        default_m is in METRES, like every value this field's ref
+        returns or accepts - see LengthFieldRef."""
+        row = self._row(label)
+        edit = QLineEdit()
+        row.addWidget(edit, 1)
+        self.form.addLayout(row)
+        ref = (ref_cls or LengthFieldRef)(edit, min_cm=min_cm, max_cm=max_cm)
+        ref.set(default_m)
+        self.fields[key] = ref
+        return edit
+
+    def add_length_list_field(self, key, label, default_m="", min_cm=0.1, max_cm=500.0):
+        return self.add_length_field(key, label, default_m, min_cm, max_cm,
+                                     ref_cls=LengthListFieldRef)
+
+    def _check_length_plausibility(self, keys=None):
+        """Returns True to go ahead. Asks for confirmation when a VISIBLE
+        cm field holds a value outside its plausible range - most likely
+        a metre value typed into a cm field. keys: limit the check to
+        these field keys (for a helper button that uses only some
+        fields); None checks every length field (the main Run)."""
+        problems = []
+        for key, ref in self.fields.items():
+            if keys is not None and key not in keys:
+                continue
+            if not isinstance(ref, LengthFieldRef):
+                continue
+            if not ref.widget.isVisibleTo(self):
+                continue  # e.g. the other SLAM backend's section
+            for value in ref.implausible_values_cm():
+                label = self._label_for_widget(ref.widget)
+                problems.append(f"{label} {value:g} cm")
+        if not problems:
+            return True
+        answer = QMessageBox.question(
+            self, "Check the length values",
+            "These values are in centimetres, and they are not usual values:\n\n"
+            + "\n".join(problems)
+            + "\n\nIf you typed a value in metres, click No and change it to "
+              "centimetres (for example, 0.05 m is 5 cm).\n\nRun with these values?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
+
+    @staticmethod
+    def _label_for_widget(widget):
+        """The row label text next to a field widget, for messages."""
+        parent_layout = widget.parentWidget().layout() if widget.parentWidget() else None
+        if parent_layout is not None:
+            for i in range(parent_layout.count()):
+                item = parent_layout.itemAt(i)
+                row = item.layout() if item is not None else None
+                if row is None or row.indexOf(widget) < 0:
+                    continue
+                first = row.itemAt(0).widget()
+                if isinstance(first, QLabel):
+                    return first.text()
+        return "Value:"
 
     def add_file_field(self, key, label, filetypes=None, default="", stacked=False):
         """stacked=True puts the label on its own line above the field
@@ -860,7 +1072,7 @@ class StageFieldsMixin:
             current = self.fields[key].get().strip()
             if only_empty and current:
                 continue
-            if current and current != entry["last"]:
+            if current and not _same_value(current, entry["last"]):
                 continue  # user-edited - keep it
             try:
                 new_value = entry["resolver"](getattr(self, "pipeline", None)) or ""
@@ -968,6 +1180,8 @@ class StageFieldsMixin:
             self._stub_run()
             return
         self._refresh_auto_defaults(only_empty=True)
+        if not self._check_length_plausibility():
+            return
         try:
             self._check_project_outputs()
             result = build_fn()
@@ -990,6 +1204,9 @@ class StageFieldsMixin:
         self._run_real_command(cmd, report, finish_info)
 
     # -- run lifecycle: lock, Stop, shutdown -------------------------------
+
+    def _show_success(self, title, text):
+        show_success_message(self, title, text)
 
     def _build_run_buttons(self, outer_layout):
         """Run + Stop row at the bottom of both containers. Stop is
@@ -1258,7 +1475,7 @@ class StageFieldsMixin:
         if success:
             self._refresh_auto_defaults()
             if record_error is None and isinstance(report, str) and report:
-                QMessageBox.information(self, "Stage Report", report)
+                self._show_success("Stage Report", report)
             if record_error is None and getattr(self, "_close_on_run_success", False):
                 self.close()
 

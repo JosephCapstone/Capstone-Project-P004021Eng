@@ -57,7 +57,8 @@ from PySide6.QtWidgets import (
     QButtonGroup, QMessageBox, QFileDialog,
 )
 
-from qt_stage_base import QStageDialog, QStagePanel, LineEditRef, SCRIPTS_DIR
+from qt_stage_base import (QStageDialog, QStagePanel, LengthFieldRef, SCRIPTS_DIR,
+                           fmt_cm)
 
 try:
     import project_manager as pm
@@ -100,14 +101,15 @@ class Stage5DiffFieldsMixin:
             extra_on_pick=self._on_comparison_picked)
         self.form = self._layout_stack.pop()
 
-        rms_row = self._row("Registration RMS (from Stage 3):")
+        rms_row = self._row("Registration RMS (cm, from Stage 3):")
         rms_edit = QLineEdit()
         rms_row.addWidget(rms_edit, 1)
         load_rms_btn = QPushButton("Load from Stage 3")
         load_rms_btn.clicked.connect(self._load_rms_from_sidecar)
         rms_row.addWidget(load_rms_btn, 0)
         self.form.addLayout(rms_row)
-        self.fields["registration_rms"] = LineEditRef(rms_edit)
+        # Shown in cm; get()/set() stay in metres (see LengthFieldRef).
+        self.fields["registration_rms"] = LengthFieldRef(rms_edit, min_cm=0.01, max_cm=50)
         self.add_hint(
             "This feeds M3C2's Level of Detection (LOD) calculation, which is what separates "
             "real change from noise/misalignment. Leave blank if unknown rather than entering "
@@ -147,9 +149,12 @@ class Stage5DiffFieldsMixin:
             "point. Search scale/depth are filled automatically as 0.5x/2x of normal scale, "
             "matching a confirmed-working reference file.")
 
-        self.add_text_field("normal_scale", "Normal scale (diameter):", default="")
-        self.add_text_field("search_scale", "Search/projection scale (diameter):", default="")
-        self.add_text_field("search_depth", "Search depth (max depth):", default="")
+        self.add_length_field("normal_scale", "Normal scale (diameter, cm):",
+                              min_cm=0.1, max_cm=200)
+        self.add_length_field("search_scale", "Search/projection scale (diameter, cm):",
+                              min_cm=0.05, max_cm=100)
+        self.add_length_field("search_depth", "Search depth (max depth, cm):",
+                              min_cm=0.1, max_cm=500)
         self.add_hint(
             "Filled automatically by 'Check Point Spacing' above, or set manually / via "
             "CloudCompare's own M3C2 dialog and 'Guess params' if you'd rather. If you edit "
@@ -215,7 +220,7 @@ class Stage5DiffFieldsMixin:
                 f"Baseline: {baseline}\n"
                 f"Comparison: {comparison}\n"
                 f"Params file used: {params}\n"
-                + (f"Registration RMS on hand: {registration_rms} m. If you used "
+                + (f"Registration RMS on hand: {fmt_cm(registration_rms)}. If you used "
                    f"'Generate Params File...' above, this is already baked into the "
                    f"params file. If you browsed to a file made via CloudCompare's GUI "
                    f"instead, make sure its registration-error was set to this value "
@@ -350,6 +355,9 @@ class Stage5DiffFieldsMixin:
             return
         if core is None:
             return
+        if not self._check_length_plausibility(
+                keys=("normal_scale", "search_scale", "search_depth", "registration_rms")):
+            return
 
         auto_named = False
         if self.pipeline is not None and pm is not None:
@@ -365,8 +373,8 @@ class Stage5DiffFieldsMixin:
         core.generate_m3c2_params_file(
             save_path, normal_scale, search_scale, search_depth, reg_rms_val)
         self.fields["params"].set(save_path)
-        QMessageBox.information(
-            self, "Params file generated",
+        self._show_success(
+            "Params file generated",
             f"Saved to:\n{save_path}\n\n"
             + ("This is a project run, so the file was named and placed automatically "
                "inside this diff's own output folder - no save location to pick by "
@@ -442,11 +450,12 @@ class Stage5DiffFieldsMixin:
         self.fields["search_depth"].set(f"{search_depth:.4f}")
 
         output += (
-            f"\n\nFilled in ({choice} of range):\n"
-            f"  Normal scale: {normal_scale:.4f}\n"
-            f"  Search scale: {search_scale:.4f}  (0.5x normal)\n"
-            f"  Search depth: {search_depth:.4f}  (2x normal)\n"
-            f"These overwrite whatever was already in those three fields."
+            f"\n\nThe values above from point_spacing.py are in metres.\n"
+            f"Filled in ({choice} of range):\n"
+            f"  Normal scale: {fmt_cm(round(normal_scale, 4))}\n"
+            f"  Search scale: {fmt_cm(round(search_scale, 4))}  (0.5x normal)\n"
+            f"  Search depth: {fmt_cm(round(search_depth, 4))}  (2x normal)\n"
+            f"These values replace the values that were in those three fields."
         )
         QMessageBox.information(self, "Point Spacing (Baseline)", output)
 

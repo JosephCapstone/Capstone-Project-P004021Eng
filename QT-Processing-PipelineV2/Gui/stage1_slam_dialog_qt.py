@@ -30,7 +30,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox, QLabel
 
-from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, CONFIGS_DIR
+from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, CONFIGS_DIR, fmt_cm
 
 try:
     import project_manager as pm
@@ -99,25 +99,19 @@ class Stage1SlamFieldsMixin:
             "value a little larger than the distance from the robot path to the farthest "
             "surface that you must keep. Leave blank to keep all points. Applies to both "
             "backends.")
-        self.kiss_max_range_label = QLabel()
-        self.kiss_max_range_label.setWordWrap(True)
-        self.form.addWidget(self.kiss_max_range_label)
-        self.add_hint(
-            "Do not decrease max_range in the config to remove far noise. In KISS-ICP, "
-            "max_range also removes map points that are far from the robot, so the "
-            "saved map keeps only the area near the last robot position. Use 'Map max "
-            "range' above.")
 
         # Only the section for the selected Backend is visible - mirrors
         # begin_section()/end_section() + grid_remove()/grid() in the
         # Tkinter version, using show()/hide() instead.
         self.ouster_section = self.begin_section()
         self.add_preset_selector("Voxel size preset:", [
-            ("Fine (0.15m) - slower, most detail", {"voxel_size": "0.15"}),
-            ("Medium (0.25m) - balanced, good default", {"voxel_size": "0.25"}),
-            ("Coarse (0.5m) - fastest, least detail", {"voxel_size": "0.5"}),
+            ("Fine (15 cm) - slower, most detail", {"voxel_size": "0.15"}),
+            ("Medium (25 cm) - balanced, good default", {"voxel_size": "0.25"}),
+            ("Coarse (50 cm) - fastest, least detail", {"voxel_size": "0.5"}),
         ])
-        self.add_text_field("voxel_size", "Voxel size (m):", default="0.25")
+        # Preset values stay in METRES - LengthFieldRef.set() shows them in cm.
+        self.add_length_field("voxel_size", "Voxel size (cm):", default_m="0.25",
+                              min_cm=1, max_cm=300)
         self.add_hint("Smaller = more detail but slower and larger output files. Start "
                        "with Medium unless you have a specific reason to change it.")
         self.add_checkbox("visualize", "Open visualizer after processing")
@@ -140,7 +134,8 @@ class Stage1SlamFieldsMixin:
         self.kiss_voxel_size_label = QLabel()
         self.kiss_voxel_size_label.setWordWrap(True)
         self.form.addWidget(self.kiss_voxel_size_label)
-        self.add_text_field("kiss_icp_voxel_size", "Voxel size override (m, optional):")
+        self.add_length_field("kiss_icp_voxel_size", "Voxel size override (cm, optional):",
+                              min_cm=0.5, max_cm=100)
         self.add_hint("Leave blank to use the config's own voxel_size, or kiss-icp's "
                        "built-in default if no config is given.")
 
@@ -154,7 +149,28 @@ class Stage1SlamFieldsMixin:
                        "config's own value, or 0.0/no cropping if the config doesn't set "
                        "one either. Start small (0.2-0.3m) and raise only as needed.")
 
+        self.kiss_max_range_label = QLabel()
+        self.kiss_max_range_label.setWordWrap(True)
+        self.form.addWidget(self.kiss_max_range_label)
+        self.add_hint(
+            "Do not decrease max_range in the config to remove far noise. In KISS-ICP, "
+            "max_range also removes map points that are far from the robot, so the "
+            "saved map keeps only the area near the last robot position. Use 'Map max "
+            "range' above, or the horizontal and vertical limits below.")
 
+        self.add_text_field("kiss_icp_map_max_horizontal",
+                            "Map max horizontal distance (m, optional):")
+        self.add_text_field("kiss_icp_map_max_vertical",
+                            "Map max vertical distance (m, optional):")
+        self.add_hint(
+            "Optional. KISS-ICP only. The saved map does not include points that are "
+            "farther than these distances from the sensor. The horizontal distance is "
+            "along the floor. The vertical distance is up or down. Use a horizontal limit "
+            "to remove far noise in an open area and keep a high ceiling. Use a vertical "
+            "limit to remove points far above or below the sensor. 'Vertical' is the up "
+            "direction of the sensor at the start of the scan. You can use these limits "
+            "together with 'Map max range'. A point must be in all of the limits that you "
+            "set.")
 
         self.add_text_field("kiss_icp_dataloader", "Force dataloader (optional):")
         self.add_text_field("kiss_icp_topic", "Rosbag topic (optional):")
@@ -180,7 +196,7 @@ class Stage1SlamFieldsMixin:
         disagree."""
         self._set_kiss_icp_config_label(
             self.kiss_voxel_size_label, "voxel_size",
-            core.read_kiss_icp_voxel_size if core else None)
+            core.read_kiss_icp_voxel_size if core else None, as_cm=True)
         self._set_kiss_icp_config_label(
             self.kiss_min_range_label, "min_range",
             core.read_kiss_icp_min_range if core else None)
@@ -188,7 +204,7 @@ class Stage1SlamFieldsMixin:
             self.kiss_max_range_label, "max_range",
             core.read_kiss_icp_max_range if core else None)
 
-    def _set_kiss_icp_config_label(self, label, field_name, reader):
+    def _set_kiss_icp_config_label(self, label, field_name, reader, as_cm=False):
         config = self.fields["kiss_icp_config"].get().strip()
         if reader is None:
             label.setText(f"This config's own {field_name}: pipeline_core.py not available")
@@ -208,7 +224,8 @@ class Stage1SlamFieldsMixin:
             label.setText(f"This config's own {field_name}: not set in this config")
             label.setStyleSheet("color: #777777; font-size: 8pt;")
             return
-        label.setText(f"This config's own {field_name}: {value} m")
+        shown = (f"{fmt_cm(value)} (the file stores {value} m)" if as_cm else f"{value} m")
+        label.setText(f"This config's own {field_name}: {shown}")
         label.setStyleSheet("color: #009955; font-size: 8pt;")
 
     def _update_backend_sections(self):
@@ -324,8 +341,8 @@ class Stage1SlamFieldsMixin:
         def on_decode_complete(returncode, cancelled):
             if returncode == 0 and not cancelled:
                 self._apply_decoded_source(output_bag)
-                QMessageBox.information(
-                    self, "Converted",
+                self._show_success(
+                    "Converted",
                     f"Decoded bag saved to:\n{output_bag}\n\n"
                     "Source has been updated to use it.")
                 return
@@ -345,6 +362,19 @@ class Stage1SlamFieldsMixin:
         # this, the decode ran with no "running" status, so another Run
         # could start on the same bag while it was still being written.
         self._run_utility_command(cmd, on_decode_complete)
+
+    def _optional_positive_meters(self, key, name):
+        """Blank -> None. Otherwise a number > 0 in metres, or ValueError."""
+        text = self.fields[key].get().strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            raise ValueError(f"{name} must be a number in metres, for example 8, or blank.")
+        if value <= 0:
+            raise ValueError(f"{name} must be greater than 0, or blank.")
+        return value
 
     def _remove_partial_output(self, path):
         path = Path(path)
@@ -433,8 +463,8 @@ class Stage1SlamFieldsMixin:
                 try:
                     kiss_voxel_size = float(voxel_size_text)
                 except ValueError:
-                    raise ValueError("Voxel size override must be a number, e.g. 0.08, or "
-                                      "left blank to use the config's own value.")
+                    raise ValueError("Voxel size override must be a number in cm, for "
+                                      "example 8, or blank to use the config's own value.")
             else:
                 kiss_voxel_size = None
             min_range_text = self.fields["kiss_icp_min_range"].get().strip()
@@ -446,10 +476,15 @@ class Stage1SlamFieldsMixin:
                                       "left blank to use the config's own value.")
             else:
                 kiss_min_range = None
+            map_max_horizontal = self._optional_positive_meters(
+                "kiss_icp_map_max_horizontal", "Map max horizontal distance")
+            map_max_vertical = self._optional_positive_meters(
+                "kiss_icp_map_max_vertical", "Map max vertical distance")
             cmd = core.build_kiss_icp_slam_command(
                 script, source, output, config=config, dataloader=dataloader,
                 topic=topic, meta=meta, voxel_size=kiss_voxel_size, min_range=kiss_min_range,
-                map_max_range=map_max_range, pipeline=active_pipeline)
+                map_max_range=map_max_range, map_max_horizontal=map_max_horizontal,
+                map_max_vertical=map_max_vertical, pipeline=active_pipeline)
 
             effective_voxel_size = (kiss_voxel_size if kiss_voxel_size is not None
                                      else core.read_kiss_icp_voxel_size(config))
@@ -462,8 +497,9 @@ class Stage1SlamFieldsMixin:
                 + (f"Config: {config}\n" if config else
                    "No config given - using kiss-icp's vehicle-scale defaults, which will "
                    "likely under-populate an indoor map. Strongly consider adding one.\n")
-                + (f"Voxel size override: {kiss_voxel_size} m\n" if kiss_voxel_size is not None
-                   else f"Voxel size (from config): {effective_voxel_size} m\n"
+                + (f"Voxel size override: {fmt_cm(kiss_voxel_size)}\n"
+                   if kiss_voxel_size is not None
+                   else f"Voxel size (from config): {fmt_cm(effective_voxel_size)}\n"
                    if effective_voxel_size is not None
                    else "Voxel size: unknown (no override, and none read from the config - "
                         "kiss-icp's own auto-derived default applies)\n")
@@ -473,6 +509,10 @@ class Stage1SlamFieldsMixin:
                    else "Min range: none set (no override, and none read from the config - "
                         "no near-sensor cropping will be applied)\n")
                 + map_max_range_line
+                + (f"Map max horizontal distance: {map_max_horizontal} m (saved map only)\n"
+                   if map_max_horizontal is not None else "")
+                + (f"Map max vertical distance: {map_max_vertical} m (saved map only)\n"
+                   if map_max_vertical is not None else "")
                 + f"Saved to: {output}\n\n"
                 "=== NOTE ===\n"
                 "Check the tool output above for the actual point count - if it's in the "
@@ -487,7 +527,7 @@ class Stage1SlamFieldsMixin:
         try:
             voxel_size = float(self.fields["voxel_size"].get())
         except ValueError:
-            raise ValueError("Voxel size must be a number, e.g. 0.25")
+            raise ValueError("Voxel size must be a number in cm, for example 25.")
         visualize = self.fields["visualize"].get()
         cmd = core.build_slam_command(source, voxel_size, output, meta=meta,
                                        visualize=visualize, map_max_range=map_max_range,
@@ -500,7 +540,7 @@ class Stage1SlamFieldsMixin:
             + (f"Meta: {meta}\n" if meta else
                "No meta file given - resolved from the source itself.\n")
             + f"Saved to: {output}\n"
-            f"Voxel size used: {voxel_size} m\n"
+            f"Voxel size used: {fmt_cm(voxel_size)}\n"
             + map_max_range_line
             + f"Visualizer: {'opened' if visualize else 'not opened'}\n\n"
             + ("=== NOTE ===\n"
