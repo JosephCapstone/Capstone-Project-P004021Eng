@@ -285,10 +285,6 @@ class DeltaUI(QMainWindow):
             controls_group
         )
 
-        controls_group.setMaximumWidth(
-            165
-        )
-
         self.start_button = QPushButton(
             "Start"
         )
@@ -355,10 +351,6 @@ class DeltaUI(QMainWindow):
 
         recording_layout = QVBoxLayout(
             recording_group
-        )
-
-        recording_group.setMaximumWidth(
-            165
         )
 
         self.bag_recording_number = QLineEdit()
@@ -611,61 +603,54 @@ class DeltaUI(QMainWindow):
         )
 
         # ====================================================
-        # RIGHT CONTROL PANEL
-        # ====================================================
-
-        control_panel_layout = QVBoxLayout()
-
-        control_panel_layout.setSpacing(
-            10
-        )
-
-        control_panel_layout.addWidget(
-            controls_group,
-            1
-        )
-
-        control_panel_layout.addWidget(
-            recording_group,
-            1
-        )
-
-        # ====================================================
-        # MAIN TOP LAYOUT
+        # LAYOUT
         # ====================================================
 
         top_layout = QHBoxLayout()
 
         top_layout.setSpacing(
-            8
+            10
         )
 
-        # Camera
         top_layout.addWidget(
             camera_group,
-            3
+            7
         )
 
-        # Mapping
         top_layout.addWidget(
             mapping_group,
-            5
+            4
         )
 
-        # Controls and recording
-        top_layout.addLayout(
-            control_panel_layout,
+        button_layout = QHBoxLayout()
+
+        button_layout.setSpacing(
+            10
+        )
+
+        button_layout.addWidget(
+            controls_group,
+            1
+        )
+
+        button_layout.addWidget(
+            recording_group,
             1
         )
 
         main_layout.addLayout(
             top_layout,
-            3
+            7
+        )
+
+        main_layout.addLayout(
+            button_layout,
+            2
         )
 
         main_layout.addWidget(
             log_group,
-            1
+            4
         )
 
         # ====================================================
