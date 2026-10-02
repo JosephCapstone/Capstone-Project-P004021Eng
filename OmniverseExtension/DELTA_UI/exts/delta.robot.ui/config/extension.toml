@@ -1,0 +1,18 @@
+# Extension details
+[package]
+title = "DELTA User Interface"
+description = "USD damage inspection interface for DELTA"
+version = "0.1.0"
+category = "DELTA"
+
+# Extension dependencies
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.usd" = {}
+"omni.kit.window.filepicker" = {}
+"omni.kit.viewport.utility" = {}
+"omni.kit.window.title" = {}
+
+# Python module
+[[python.module]]
+name = "delta.robot.ui"
