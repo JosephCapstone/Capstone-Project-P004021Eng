@@ -48,7 +48,7 @@ def generate_launch_description():
             package='qbot_platform',
             executable='qbot_platform_driver_interface',
             name='QBotPlatformDriver',
-            parameters=[{'arm_robot': True}],
+            parameters=[{'arm_robot': False}],
         )
 
     joystick_command_node = Node(
