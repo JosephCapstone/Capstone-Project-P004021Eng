@@ -34,7 +34,7 @@ class CalloutBox:
         self._horizontal_shift = 0.0
         self._color = 0xFF0000FF
         
-
+        self._label_text = frame_name
         
         self._pulse_max = 255
         self._pulse_min = 75
@@ -119,7 +119,7 @@ class CalloutBox:
                             thickness=3.0,
                         )
                         self._label = sc.Label(
-                            "damage point 1 damage point 1",
+                            self._label_text,
                             color=0xFF000000,
                             alignment=ui.Alignment.CENTER, 
                         )
