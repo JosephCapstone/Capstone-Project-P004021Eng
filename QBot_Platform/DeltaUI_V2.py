@@ -107,7 +107,7 @@ class DeltaUI(QMainWindow):
 
         title_layout = QHBoxLayout()
 
-        title_label = QLabel("D.E.L.T.A")
+        title_label = QLabel("D.E.L.T.A Operator Interface")
         title_label.setStyleSheet("""
             font-size: 32px;
             font-weight: bold;
