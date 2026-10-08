@@ -8,7 +8,7 @@ The project consists of three main components:
 - Processing Pipline - processing of data collected
 - Nvidia Omniverse - visualisation
 
-The three components work together to navigate around a space, perform a scan, process data to create a baseline, perform a scan in a changed enviroment and 
+The three components work together to ... (broad strokes explanation)
 
 ## Project Structure
 ### QBot_Platform
@@ -29,7 +29,6 @@ The `Nvidia_Omniverse` folder contains the scripts and files associated with vis
 (At some point move all Nvidia Omniverse scripts/files into this folder)
 
 See ['Nvidia_Omniverse README.md'](Nvidia_Omniverse/README.md') for furthur infomation.
-
 
 
 # Everything below here is old and needs to be updated
