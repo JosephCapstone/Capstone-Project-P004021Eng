@@ -671,6 +671,14 @@ def get_diff_inputs(handle):
             "registration_error_used": <float or None>,
         }
 
+    Update 6: when a side's Segment run also wrote
+    <name>_envelope_filtered.ply (recorded as "envelope_filtered_output"),
+    that copy is used instead of <name>_classified.ply. It has the same
+    fields, without the unclassified points outside the room (scan noise
+    and returns from beyond the walls), so that junk does not go into
+    M3C2. reference_outside_removed / comparison_outside_removed (bool)
+    tell which copy each side got.
+
     reference_source_stage / comparison_source_stage record which stage
     each path actually came from - a caller (the Stage 5 dialog's report,
     in particular) can use this to tell the user plainly whether the
@@ -714,8 +722,14 @@ def get_diff_inputs(handle):
     comp_stages = scans[comparison]["stages"]
 
     def _resolve_side(stages, side_label):
-        segment_output = stages.get("segment", {}).get("output")
+        segment = stages.get("segment", {})
+        segment_output = segment.get("output")
         if segment_output:
+            # Update 6: prefer the copy without the points outside the
+            # room (Stage 4's 'outside_envelope' junk), when it was written.
+            filtered = segment.get("envelope_filtered_output")
+            if filtered and (project.root / filtered).is_file():
+                return filtered, "segment"
             return segment_output, "segment"
         cleanup_output = stages.get("cleanup", {}).get("output")
         if cleanup_output:
@@ -734,8 +748,28 @@ def get_diff_inputs(handle):
         "comparison_path": str(project.root / comp_output),
         "reference_source_stage": ref_source,
         "comparison_source_stage": comp_source,
+        "reference_outside_removed": is_envelope_filtered_path(ref_output),
+        "comparison_outside_removed": is_envelope_filtered_path(comp_output),
         "registration_error_used": comp_cleanup.get("icp_rms"),
     }
+
+
+def is_envelope_filtered_path(path):
+    """True if path is a Stage 4 (Segment) copy with the points outside
+    the room removed (<name>_envelope_filtered.ply)."""
+    return Path(str(path)).name.endswith("envelope_filtered.ply")
+
+
+def envelope_filtered_sibling(path):
+    """For a Stage 4 (Segment) <name>_classified.ply, returns the Path of
+    the same pass's <name>_envelope_filtered.ply if that file exists,
+    otherwise None. Used by Stage 5 (Diff) to offer the copy without the
+    points outside the room."""
+    path = Path(str(path))
+    if not path.name.endswith("_classified.ply"):
+        return None
+    sibling = path.with_name(path.name[:-len("_classified.ply")] + "_envelope_filtered.ply")
+    return sibling if sibling.is_file() else None
 
 
 def get_baseline_cleanup_output(project):
@@ -823,7 +857,7 @@ def to_relative_path(project, path):
     return _to_relative(project, path)
 
 
-def _scan_stage_folder(handle, stage_name):
+def _scan_stage_folder(handle, stage_name, include_envelope_filtered=False):
     """
     Returns every output file that actually exists in ONE stage's
     folder - not just the one currently recorded as that stage's
@@ -841,6 +875,12 @@ def _scan_stage_folder(handle, stage_name):
     recorded "output" field in project.json - purely informational
     (PROJECT_INPUT_PICKER_PLAN.md Section 3: nothing gets pre-selected
     from this anymore), not necessarily the highest sequence number.
+
+    include_envelope_filtered (segment only, update 6): also list each
+    pass's <name>_envelope_filtered.ply (when it exists) directly above
+    that pass's <name>_classified.ply, with the note "outside-room points
+    removed". list_side_candidates() turns this on, so Diff (Stage 5) can
+    use the copy without the junk outside the room.
     """
     folder_name = handle.stage_folders[stage_name]
     folder = handle.root / folder_name
@@ -876,12 +916,25 @@ def _scan_stage_folder(handle, stage_name):
             if not classified.is_file():
                 continue
             rel_path = f"{rel_folder}/{folder_name}/{sub.name}/{classified.name}"
+            filtered = sub / f"{sub.name}_envelope_filtered.ply"
+            if include_envelope_filtered and filtered.is_file():
+                results.append({
+                    "path": f"{rel_folder}/{folder_name}/{sub.name}/{filtered.name}",
+                    "sequence": int(stem_after_prefix),
+                    "is_current": False,
+                    "note": "outside-room points removed",
+                    "order": 0,
+                })
             results.append({
                 "path": rel_path,
                 "sequence": int(stem_after_prefix),
                 "is_current": rel_path == current_output,
+                "order": 1,
             })
-        results.sort(key=lambda r: r["sequence"], reverse=True)
+        # Newest pass first; inside one pass, the filtered copy first.
+        results.sort(key=lambda r: (-r["sequence"], r["order"]))
+        for r in results:
+            del r["order"]
         return results
 
     results = []
@@ -1012,7 +1065,9 @@ def list_side_candidates(project, pipeline_ref):
 
     Returns a list of group dicts, same shape as list_eligible_inputs()
     - one group each for "cleanup" and "segment", in that order, skipped
-    if empty. 0, 1, or 2 groups.
+    if empty. 0, 1, or 2 groups. The segment group also lists each pass's
+    <name>_envelope_filtered.ply when it exists (note "outside-room
+    points removed"), above that pass's <name>_classified.ply.
 
     Raises ProjectError if pipeline_ref is not "baseline" or a known
     scan ID.
@@ -1027,7 +1082,7 @@ def list_side_candidates(project, pipeline_ref):
 
     groups = []
     for stage_name in ("cleanup", "segment"):
-        files = _scan_stage_folder(handle, stage_name)
+        files = _scan_stage_folder(handle, stage_name, include_envelope_filtered=True)
         if files:
             groups.append({
                 "pipeline_kind": handle.kind,
@@ -1180,18 +1235,3 @@ def promote_baseline(project, stage_name):
     baseline["promoted_stage"] = stage_name
     baseline["promoted_timestamp"] = _now_iso()
     save_project(project)
-
-
-if __name__ == "__main__":
-    print(__doc__)
-    print(
-        "This file is a library module - it's meant to be imported by other "
-        "scripts (test_project_manager.py, and pipeline_core.py / "
-        "pipeline_applet.py), not run directly. Running it this way defines "
-        "everything above but doesn't DO anything, which is why a double-click "
-        "just opens and immediately closes a console window - nothing crashed, "
-        "there's just nothing here that acts on its own.\n"
-        "\n"
-        "To actually see this module do something, run:\n"
-        "    python test_project_manager.py\n"
-    )

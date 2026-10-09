@@ -333,7 +333,7 @@
         <item>
          <widget class="QPushButton" name="stage4Button">
           <property name="text">
-           <string>Stage 4: Segment</string>
+           <string>Stage 4: Segment (optional)</string>
           </property>
          </widget>
         </item>

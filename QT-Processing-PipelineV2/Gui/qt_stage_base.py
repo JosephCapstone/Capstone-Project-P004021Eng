@@ -305,13 +305,15 @@ class ProjectFilePicker(QDialog):
         building this string is this file's job, matching
         pipeline_applet.py's own tree-row formatting."""
         name = Path(file_info["path"]).name
-        if file_info.get("note"):
-            return f"{name} ({file_info['note']})"
         parts = []
         if file_info.get("sequence") is not None:
             parts.append(f"pass {file_info['sequence']}")
         if file_info.get("is_current"):
             parts.append("current")
+        if file_info.get("note"):
+            # 'import.bag (decoded)'; a Segment pass's filtered copy shows
+            # 'x_envelope_filtered.ply (pass 2, outside-room points removed)'.
+            parts.append(file_info["note"])
         return f"{name} ({', '.join(parts)})" if parts else name
 
     def _on_choose(self):

@@ -114,11 +114,16 @@ class Stage6ClassifyFieldsMixin:
             "field in the input file - CloudCompare writes one automatically for any M3C2 "
             "run.")
 
-        self.add_checkbox("keep_all", "Keep all points (add a flag field instead of filtering)")
+        self.add_checkbox("keep_all", "Keep all points (add a flag field instead of filtering)",
+                          default=True)
         self.add_hint(
-            "Off by default: only flagged points are kept, giving a clean change-highlight "
-            "cloud for Stage 7. Turn this on if you want to inspect the threshold's effect "
-            "in CloudCompare before committing.")
+            "On by default. The output keeps every point, with a 'classified' field (1 = "
+            "above the threshold) and, with clustering, a 'cluster_id' field (the damage "
+            "site, -1 = none). Stage 7 then makes a full surface from all points, and "
+            "Stage 8 shows only the flagged points as a separate layer (FlaggedPoints, "
+            "filled in automatically). Turn this off to keep only the flagged points: the "
+            "Stage 7 surface then covers only the damage areas, which usually gives a "
+            "broken surface.")
 
         self.add_checkbox("cluster", "Cluster flagged points into damage sites", default=True)
         self.add_hint(
@@ -311,7 +316,9 @@ class Stage6ClassifyFieldsMixin:
                 "not 0% (threshold too high) or nearly 100% (threshold too low).\n\n"
                 "=== NEXT STEPS ===\n"
                 + ("Open in CloudCompare to see which points got flagged before "
-                   "deciding on a final threshold.\n"
+                   "deciding on a final threshold. Or use this file as the input to "
+                   "Stage 7 (Surface) for a full surface: Stage 8 then shows only the "
+                   "flagged points as the FlaggedPoints layer.\n"
                    if keep_all else
                    "Use this file as the input to Stage 7 (Surface), or directly as "
                    "the --change input to Stage 8 (Export) if reconstruction isn't "

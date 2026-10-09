@@ -176,6 +176,25 @@ STAGE_PANEL_CLASSES = {
     name: _load_panel_class(name, module, cls) for name, module, cls in STAGE_PANEL_SPECS
 }
 
+# Optional stages (update 10): the page title, the stage button (.ui file)
+# and the project status line say "(optional)". Stage 4 (Segment) is
+# optional: Stage 5 (Diff) uses Stage 3's cleanup output for a side that
+# has no Segment run (project_manager.get_diff_inputs()). The internal
+# stage names above stay the same, so nothing else changes.
+OPTIONAL_STAGES = {"Stage 4: Segment"}
+OPTIONAL_STAGE_KEYS = {"segment"}
+
+
+def stage_title(stage_name):
+    return f"{stage_name} (optional)" if stage_name in OPTIONAL_STAGES else stage_name
+
+
+def next_stage_text(next_stage):
+    if next_stage is None:
+        return "done"
+    return f"{next_stage} (optional)" if next_stage in OPTIONAL_STAGE_KEYS else next_stage
+
+
 # Stages 1-4 act on the "source" pipeline (baseline or a scan);
 # Stages 5-8 act on the "diff" pipeline - matches project_manager.py's
 # own BASELINE_SCAN_STAGE_NAMES / DIFF_STAGE_NAMES split exactly.
@@ -414,14 +433,14 @@ class PipelineAppletWindow(QMainWindow):
         if self.active_source_pipeline is not None:
             next_stage = pm.find_next_stage(self.active_source_pipeline)
             parts.append(f"{pipeline_label(self.active_source_pipeline)} "
-                         f"next: {next_stage or 'done'}")
+                         f"next: {next_stage_text(next_stage)}")
             raw = self.active_source_pipeline.entry.get("raw") or {}
             if raw.get("decoded_path"):
                 parts.append("decoded source set")
         if self.active_diff_pipeline is not None:
             next_stage = pm.find_next_stage(self.active_diff_pipeline)
             parts.append(f"{pipeline_label(self.active_diff_pipeline)} "
-                         f"next: {next_stage or 'done'}")
+                         f"next: {next_stage_text(next_stage)}")
 
         self.ui.statusLabel.setText("   |   ".join(parts))
 
@@ -444,8 +463,14 @@ class PipelineAppletWindow(QMainWindow):
         page = self._stage_pages[stage_name]
         if hasattr(page, "refresh_registered_baselines"):
             page.refresh_registered_baselines()
+        # Auto-filled fields (output paths, Stage 8's damage-sites file)
+        # follow what earlier stages have recorded since this page was
+        # built. A value the user typed is never replaced - see
+        # qt_stage_base.register_auto_default().
+        if hasattr(page, "_refresh_auto_defaults") and getattr(page, "_active_run", None) is None:
+            page._refresh_auto_defaults()
         self.ui.stageStack.setCurrentWidget(page)
-        self.ui.stageTitleLabel.setText(stage_name)
+        self.ui.stageTitleLabel.setText(stage_title(stage_name))
         self.ui.appLogConsole.appendPlainText(f"Switched to {stage_name}")
 
     def _pipeline_for_stage(self, stage_name):

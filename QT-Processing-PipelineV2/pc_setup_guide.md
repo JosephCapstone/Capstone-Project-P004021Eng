@@ -26,7 +26,7 @@ Some packages that the application uses do not support the newest Python version
 3. Find a release in the **Python 3.11** series or the **Python 3.12** series.
 4. Click the link for the **Windows installer (64-bit)** for that release.
 
-**CAUTION:** Do not use a Python version newer than 3.12. The `open3d` package does not install on newer versions. Stages 2, 4 and 7 do not operate without `open3d`.
+**CAUTION:** Do not use a Python version newer than 3.12. The `open3d` package does not install on newer versions. Stages 2 and 4 do not operate without `open3d`.
 
 ### 2b. Run the Installer
 
@@ -76,11 +76,13 @@ Some packages that the application uses do not support the newest Python version
            point_spacing.py
            m3c2_classify.py
            surface_reconstruction.py
+           blender_surface.py
            extract_damage_detail.py
            usd_export.py
            generate_m3c2_params.py
        configs\
            kiss_icp_config_indoor.yaml
+           ExtraDownsampling.blend
    ```
 
 **CAUTION:** Keep the `gui`, `scripts` and `configs` folders together in the same parent folder. The application finds the scripts and the configuration file from this layout. If you move one folder, the stages cannot find their scripts.
@@ -116,7 +118,9 @@ Then do steps 6 and 7 again.
 
 **NOTE:** If `open3d` does not install, go to Sections 8 and 9 of the troubleshooting sheet.
 
-## 6. Install CloudCompare
+## 6. Install CloudCompare and Blender
+
+### 6a. Install CloudCompare
 
 Stage 3 (Cleanup) and Stage 5 (Diff) use CloudCompare.
 
@@ -129,6 +133,26 @@ Stage 3 (Cleanup) and Stage 5 (Diff) use CloudCompare.
 7. Wait until the installation is complete.
 8. Click **Finish**.
 9. Write down the installation folder. You use this folder in Section 7.
+
+### 6b. Install Blender
+
+Stage 7 (Surface) uses Blender.
+
+1. Open a web browser.
+2. Go to `https://www.blender.org/download/`.
+3. Download Blender for Windows. Use version 5.2 or newer.
+4. Open the installer.
+5. Follow the instructions in the installer. Use the default installation folder.
+6. Wait until the installation is complete.
+7. Click **Finish**.
+
+**CAUTION:** Use Blender 5.2 or newer. The file `configs\ExtraDownsampling.blend` was saved with Blender 5.2. An older Blender version can give a wrong result or an error.
+
+**NOTE:** You do not have to add Blender to PATH. The application finds Blender in its default installation folder (`C:\Program Files\Blender Foundation\Blender <version>`) or in the Steam folder. If you installed Blender in a different folder, click **Browse...** next to "Blender program" in Stage 7 and select `blender.exe`. You can also set the environment variable `DELTA_BLENDER` to the full path of `blender.exe`.
+
+**NOTE:** In Stage 7, the line below "Blender program" shows "Blender found" (green) or "Blender not found" (red).
+
+**NOTE:** A large input (millions of points) needs some minutes and some GB of memory. In a test, a cloud of 3.9 million points needed 1.5 minutes and 5 GB of memory.
 
 ## 7. Add the Tools to PATH
 
@@ -195,8 +219,19 @@ Do these tests after you install the application. The tests do not need LiDAR da
    python test_project_manager.py
    python test_pipeline_core_project_mode.py
    python test_qt_smoke.py
+   python test_blender_surface.py
+   python test_usd_export.py
+   python test_damage_detail.py
+   python test_segment_to_usd.py
    ```
 4. Make sure that each test shows `ALL TESTS PASSED` or `All ... checks passed` at the end.
+
+**NOTE:** `test_blender_surface.py` runs Blender. If the application cannot find Blender, the test shows `SKIPPED`. Install Blender (Section 6b) and do the test again. If Blender is in a different folder, type this command:
+```
+python test_blender_surface.py --blender "<full path of blender.exe>"
+```
+
+**NOTE:** `test_segment_to_usd.py` runs the Stage 4, Stage 6 and Stage 8 scripts on a test room. It needs `open3d` and `scikit-learn` (Section 5). It can run for up to 1 minute.
 
 **NOTE:** If a test shows `[FAIL]`, the test stops. Copy all of the text in the window into your bug report.
 
@@ -221,5 +256,7 @@ A stage can run for a long time. For example, Stage 4 (Segment) can run for many
 | Other Python packages | `python -m pip show open3d kiss-icp` | Details for each package |
 | Ouster CLI | `where ouster-cli` | A path to `ouster-cli.exe` |
 | CloudCompare | `where CloudCompare` | A path to `CloudCompare.exe` |
+| Blender | Open Stage 7 in the application | The line below "Blender program" shows "Blender found" |
+| Blender self-test | `python test_blender_surface.py` (in `gui`) | `All ... checks passed` |
 | Self-tests | `python test_qt_smoke.py` (in `gui`) | `All ... checks passed` |
 | Application | Double-click `run_pipeline_qt.bat` | The application window opens |

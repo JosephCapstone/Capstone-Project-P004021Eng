@@ -6,7 +6,7 @@
 # GUI - the Qt toolkit that makes the application window (required)
 PySide6>=6.5
 
-# Point cloud processing (Stages 2, 4, 5 point spacing, 7)
+# Point cloud processing (Stages 2, 4, 5 point spacing, 6, 8)
 numpy
 open3d
 plyfile

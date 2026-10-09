@@ -21,6 +21,25 @@ Scene layout:
                              since M3C2's core points are baseline-sourced),
                              this shows what damage/debris actually looks
                              like right now.
+        /FlaggedPoints     - optional (--flagged). Only the flagged points of
+                             a Stage 6 (Classify) output, coloured like
+                             ChangeHighlight. Use it when Classify ran with
+                             'Keep all points': Stage 7 then meshes the whole
+                             surface for ChangeHighlight, and this layer
+                             shows only the damage (see select_flagged()).
+        /DamageSites       - optional (--clusters). One marker per damage
+                             site from m3c2_classify.py's <name>.clusters.json:
+                             a see-through box at the site's centroid, sized
+                             to its extent, red by its max magnitude. Each
+                             site stores its numbers as 'delta:' attributes
+                             (see add_damage_sites()). With --surfaces, each
+                             site also gets the surface it sits on (wall_2,
+                             floor, ...) from Stage 4 (Segment).
+
+Units and axes: the stage is written in metres (metersPerUnit = 1) with
+Z up, and /World is the default prim. Without metersPerUnit, a USD reader
+uses its default of 0.01 (centimetres), so Omniverse/Isaac Sim can show
+the compartment 100 times too small (update 6 fix).
 
 Accepts either a plain point cloud or a mesh (auto-detected via presence
 of a 'face' element in the PLY) for --baseline and --change independently
@@ -28,11 +47,17 @@ of a 'face' element in the PLY) for --baseline and --change independently
 change-highlight, or both as meshes.
 
 Requires:
-    pip install usd-core plyfile numpy
+    pip install usd-core plyfile numpy scipy   (scipy only for --surfaces)
 
 Usage (matches what the pipeline applet's Stage 6 calls):
     python usd_export.py --baseline baseline.ply --change change.ply --output scene.usd
     python usd_export.py --baseline baseline.ply --change change.ply --output scene.usd --usdz
+    python usd_export.py --baseline baseline.ply --change change.ply --output scene.usd \
+        --clusters classified.clusters.json
+    python usd_export.py --baseline baseline.ply --change change.ply --output scene.usd \
+        --clusters classified.clusters.json --surfaces segment_classified.ply
+    python usd_export.py --baseline baseline.ply --change surface_mesh.ply --output scene.usd \
+        --flagged classified_keep_all.ply
 
 Confirmed working for point clouds: producing a valid, readable .usd
 (checked via Usd.Stage.Open + ExportToString). Mesh support (UsdGeom.Mesh
@@ -42,17 +67,22 @@ first use of either.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 from plyfile import PlyData
-from pxr import Sdf, Usd, UsdGeom, UsdUtils, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdUtils, Vt
 
 BASELINE_DISPLAY_COLOR = (0.5, 0.5, 0.5)     # muted grey
 BASELINE_POINT_WIDTH = 0.01                   # meters
 CHANGE_POINT_WIDTH = 0.03                     # meters, larger so it stands out
 FALLBACK_HIGHLIGHT_COLOR = (1.0, 0.6, 0.0)    # used only if no scalar field is found
+SITE_MIN_SIZE = 0.02                          # meters - a flat site still gets a visible box
+SITE_OPACITY = 0.35                           # see-through, so the geometry inside shows
+SURFACE_MATCH_DISTANCE = 0.05                 # meters - a site point farther than this from
+                                              # every Segment point gets no surface label
 
 
 def find_distance_field(vertex):
@@ -305,6 +335,275 @@ def add_layer(stage, prim_path, ply_path, point_width, warn_if_missing=False,
         print(f"  {len(pos)} points added.")
 
 
+def select_flagged(path):
+    """Reads a Stage 6 (Classify) output and returns (positions Nx3
+    float32, scalar_field N float32 or None, rule) for its flagged points
+    only. rule is a short text that tells which field was used:
+
+      - 'cluster_id' field: points with cluster_id >= 0 (flagged AND in a
+        damage site - the same points a Classify run without 'Keep all
+        points' writes).
+      - else 'classified' field: points with classified == 1 (passed the
+        distance threshold; Classify ran with clustering off).
+      - else: all points (the file has only flagged points already).
+    """
+    vertex = PlyData.read(str(path))["vertex"]
+    names = vertex.data.dtype.names or ()
+    positions = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=-1).astype(np.float32)
+    if "cluster_id" in names:
+        keep = np.asarray(vertex["cluster_id"]) >= 0
+        rule = "cluster_id >= 0"
+    elif "classified" in names:
+        keep = np.asarray(vertex["classified"]) == 1
+        rule = "classified = 1"
+    else:
+        keep = np.ones(len(positions), dtype=bool)
+        rule = "all points (no flag field)"
+    field_name = find_distance_field(vertex)
+    scalar_field = (np.asarray(vertex[field_name], dtype=np.float32)[keep]
+                    if field_name else None)
+    return positions[keep], scalar_field, rule
+
+
+def add_flagged_layer(stage, prim_path, path, voxel_size=None):
+    """Adds the flagged points of a Classify output as a Points prim,
+    coloured by the M3C2 field (or FALLBACK_HIGHLIGHT_COLOR without one).
+    Returns the number of points added."""
+    positions, scalar_field, rule = select_flagged(path)
+    print(f"  {len(positions)} flagged point(s) ({rule}).")
+    if not len(positions):
+        print("  NOTE: no flagged points - the FlaggedPoints layer is empty.")
+    if scalar_field is not None and len(positions):
+        colors = diverging_colormap(scalar_field)
+    else:
+        colors = np.tile(FALLBACK_HIGHLIGHT_COLOR, (len(positions), 1)).astype(np.float32)
+    if voxel_size and len(positions):
+        n_before = len(positions)
+        positions, colors = voxel_downsample(positions, colors, voxel_size)
+        print(f"  Downsampled {n_before} -> {len(positions)} points (voxel size {voxel_size}).")
+    add_point_cloud(stage, prim_path, positions, colors, CHANGE_POINT_WIDTH)
+    return len(positions)
+
+
+def load_clusters(path):
+    """Reads m3c2_classify.py's <name>.clusters.json. Returns the whole
+    summary dict. Raises ValueError with a clear message if the file is
+    not a cluster summary."""
+    try:
+        summary = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"Could not read the cluster summary '{path}': {e}")
+    if not isinstance(summary, dict) or not isinstance(summary.get("clusters"), list):
+        raise ValueError(f"'{path}' is not a cluster summary from m3c2_classify.py "
+                         f"(no 'clusters' list).")
+    return summary
+
+
+def load_surface_cloud(path):
+    """Reads a Stage 4 (Segment) cloud - <name>_classified.ply or
+    <name>_envelope_filtered.ply - and the manifest.json beside it.
+
+    Returns (positions Nx3 float64, classification N int32, names) where
+    names maps each classification number to its surface name (0 =
+    'unclassified', 1 = 'floor', ...). Without a manifest.json, a number
+    other than 0 is named 'surface_<n>'.
+
+    Raises ValueError if the file has no 'classification' field."""
+    ply = PlyData.read(str(path))
+    if "vertex" not in ply:
+        raise ValueError(f"'{path}' has no vertex data.")
+    vertex = ply["vertex"]
+    field_names = vertex.data.dtype.names or ()
+    field = next((n for n in field_names
+                  if n.lower() in ("classification", "scalar_classification")), None)
+    if field is None:
+        raise ValueError(
+            f"'{path}' has no 'classification' field. Use a Stage 4 (Segment) output "
+            f"(<name>_classified.ply or <name>_envelope_filtered.ply).")
+    positions = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=-1).astype(np.float64)
+    classification = np.rint(np.asarray(vertex[field], dtype=np.float64)).astype(np.int32)
+
+    names = {0: "unclassified"}
+    manifest_path = Path(path).parent / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            ids = json.loads(manifest_path.read_text(encoding="utf-8")).get(
+                "classification_ids") or {}
+            names.update({int(k): str(v) for k, v in ids.items()})
+        except (OSError, ValueError, AttributeError):
+            print(f"  WARNING: could not read surface names from {manifest_path}.")
+    else:
+        print(f"  NOTE: no manifest.json beside {path} - surfaces are named by number.")
+    return positions, classification, names
+
+
+def find_site_points(clusters_path, summary):
+    """Finds the Classify output that the cluster summary belongs to (the
+    .ply beside it with the same name: X.clusters.json -> X.ply, or the
+    summary's own 'output' entry) and returns (positions Nx3 float64,
+    cluster_id N int32) for its points. Returns None if that file is not
+    found or has no cluster_id field."""
+    candidates = [Path(clusters_path).with_suffix("").with_suffix(".ply")]
+    if summary.get("output"):
+        candidates.append(Path(summary["output"]))
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        vertex = PlyData.read(str(candidate))["vertex"]
+        if "cluster_id" not in (vertex.data.dtype.names or ()):
+            continue
+        positions = np.stack([vertex["x"], vertex["y"], vertex["z"]],
+                             axis=-1).astype(np.float64)
+        return positions, np.asarray(vertex["cluster_id"], dtype=np.int32)
+    return None
+
+
+def label_sites(summary, surface_cloud, site_points=None):
+    """Adds 'surface', 'surface_id' and 'surface_share' to each cluster in
+    summary (changed in place). Returns the number of labelled sites.
+
+    The label is the surface that most of the site's points sit on:
+      - With site_points (the Classify output's own points and their
+        cluster_id), each point of the site gets the classification of
+        the nearest Segment point within SURFACE_MATCH_DISTANCE.
+      - Without site_points, the Segment points inside the site's box
+        (centroid +/- half the extent, at least SITE_MIN_SIZE) are used.
+    surface_share is the fraction of those points on that surface (0-1),
+    so a site across a corner shows a low share."""
+    from scipy.spatial import cKDTree
+
+    positions, classification, names = surface_cloud
+    clusters = summary.get("clusters") or []
+    if not clusters or not len(positions):
+        return 0
+
+    tree = None
+    if site_points is not None:
+        site_pos, site_ids = site_points
+        flagged = site_pos[site_ids >= 0]
+        if len(flagged):
+            low = flagged.min(axis=0) - SURFACE_MATCH_DISTANCE
+            high = flagged.max(axis=0) + SURFACE_MATCH_DISTANCE
+            near = np.all((positions >= low) & (positions <= high), axis=1)
+            near_index = np.nonzero(near)[0]
+            if len(near_index):
+                tree = cKDTree(positions[near_index])
+
+    n_labelled = 0
+    for index, cluster in enumerate(clusters):
+        cluster_id = int(cluster.get("cluster_id", index))
+        if site_points is not None:
+            points = site_points[0][site_points[1] == cluster_id]
+            if tree is None or not len(points):
+                continue
+            distance, nearest = tree.query(points, k=1)
+            matched = distance <= SURFACE_MATCH_DISTANCE
+            values = classification[near_index[nearest[matched]]]
+            total = len(points)
+        else:
+            centroid = np.asarray(cluster["centroid"], dtype=np.float64)
+            half = np.maximum(np.asarray(cluster.get("extent", [0, 0, 0]), dtype=np.float64),
+                              SITE_MIN_SIZE) / 2.0
+            inside = np.all(np.abs(positions - centroid) <= half, axis=1)
+            values = classification[inside]
+            total = len(values)
+        if not len(values):
+            continue
+        ids, counts = np.unique(values, return_counts=True)
+        best = int(np.argmax(counts))
+        surface_id = int(ids[best])
+        cluster["surface_id"] = surface_id
+        cluster["surface"] = names.get(surface_id, f"surface_{surface_id}")
+        cluster["surface_share"] = float(counts[best]) / float(total)
+        n_labelled += 1
+    return n_labelled
+
+
+def _site_color(max_magnitude, largest):
+    """Pale orange (small change) to strong red (largest change in this
+    file) - sites are ranked against each other, not against a fixed
+    distance, the same idea as diverging_colormap()."""
+    t = max(0.0, min(1.0, max_magnitude / largest)) if largest > 0 else 1.0
+    return Gf.Vec3f(1.0, 0.75 * (1.0 - t), 0.2 * (1.0 - t))
+
+
+def add_damage_sites(stage, prim_path, summary):
+    """
+    Adds one marker per damage site under prim_path:
+
+        <prim_path>                 Xform, with delta:nFlagged / nConfirmed /
+                                    nNoise / threshold / source attributes
+          /Site_00                  Xform at the site centroid (meters)
+            /Bounds                 Cube, scaled to the site extent
+                                    (at least SITE_MIN_SIZE per axis)
+
+    Each Site_NN stores its own numbers as custom attributes, which show
+    in Omniverse's Property panel under 'Raw USD Properties':
+        delta:clusterId, delta:pointCount (int)
+        delta:centroid (double3, m), delta:extent (float3, m)
+        delta:meanMagnitude, delta:maxMagnitude (float, m - absolute M3C2
+        distance, so always >= 0; the sign is in ChangeHighlight's colours)
+        delta:surface (string), delta:surfaceId (int), delta:surfaceShare
+        (float, 0-1) - only when label_sites() found the site's surface.
+        The site's display name then includes the surface, for example
+        "Site 03 - wall_2".
+
+    Returns the number of sites added.
+    """
+    clusters = summary.get("clusters") or []
+    group = UsdGeom.Xform.Define(stage, prim_path).GetPrim()
+    for key, attr, type_name in (("n_flagged", "delta:nFlagged", Sdf.ValueTypeNames.Int),
+                                 ("n_confirmed", "delta:nConfirmed", Sdf.ValueTypeNames.Int),
+                                 ("n_noise", "delta:nNoise", Sdf.ValueTypeNames.Int),
+                                 ("threshold", "delta:threshold", Sdf.ValueTypeNames.Float),
+                                 ("source", "delta:source", Sdf.ValueTypeNames.String),
+                                 ("surface_source", "delta:surfaceSource",
+                                  Sdf.ValueTypeNames.String)):
+        if summary.get(key) is not None:
+            group.CreateAttribute(attr, type_name).Set(summary[key])
+
+    largest = max((float(c.get("max_magnitude", 0.0)) for c in clusters), default=0.0)
+    for index, cluster in enumerate(clusters):
+        cluster_id = int(cluster.get("cluster_id", index))
+        centroid = [float(v) for v in cluster["centroid"]]
+        extent = [float(v) for v in cluster.get("extent", [0.0, 0.0, 0.0])]
+        size = [max(v, SITE_MIN_SIZE) for v in extent]
+
+        site = UsdGeom.Xform.Define(stage, f"{prim_path}/Site_{cluster_id:02d}")
+        UsdGeom.XformCommonAPI(site).SetTranslate(Gf.Vec3d(*centroid))
+        prim = site.GetPrim()
+        prim.CreateAttribute("delta:clusterId", Sdf.ValueTypeNames.Int).Set(cluster_id)
+        prim.CreateAttribute("delta:pointCount", Sdf.ValueTypeNames.Int).Set(
+            int(cluster.get("point_count", 0)))
+        prim.CreateAttribute("delta:centroid", Sdf.ValueTypeNames.Double3).Set(
+            Gf.Vec3d(*centroid))
+        prim.CreateAttribute("delta:extent", Sdf.ValueTypeNames.Float3).Set(Gf.Vec3f(*extent))
+        for key, attr in (("mean_magnitude", "delta:meanMagnitude"),
+                          ("max_magnitude", "delta:maxMagnitude")):
+            if cluster.get(key) is not None:
+                prim.CreateAttribute(attr, Sdf.ValueTypeNames.Float).Set(float(cluster[key]))
+        display_name = f"Site {cluster_id:02d}"
+        if cluster.get("surface") is not None:
+            prim.CreateAttribute("delta:surface", Sdf.ValueTypeNames.String).Set(
+                str(cluster["surface"]))
+            prim.CreateAttribute("delta:surfaceId", Sdf.ValueTypeNames.Int).Set(
+                int(cluster["surface_id"]))
+            prim.CreateAttribute("delta:surfaceShare", Sdf.ValueTypeNames.Float).Set(
+                float(cluster["surface_share"]))
+            display_name += f" - {cluster['surface']}"
+        if hasattr(prim, "SetDisplayName"):  # USD 23.11 and newer
+            prim.SetDisplayName(display_name)
+
+        box = UsdGeom.Cube.Define(stage, f"{prim_path}/Site_{cluster_id:02d}/Bounds")
+        box.CreateSizeAttr(1.0)
+        UsdGeom.XformCommonAPI(box).SetScale(Gf.Vec3f(*size))
+        box.CreateDisplayColorPrimvar(UsdGeom.Tokens.constant).Set(
+            Vt.Vec3fArray([_site_color(float(cluster.get("max_magnitude", 0.0)), largest)]))
+        box.CreateDisplayOpacityPrimvar(UsdGeom.Tokens.constant).Set(
+            Vt.FloatArray([SITE_OPACITY]))
+    return len(clusters)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -315,6 +614,22 @@ def main():
                               "comparison-cloud geometry near flagged locations, "
                               "added as a third layer (/World/Compartment/DamageDetail) "
                               "alongside the abstract magnitude-only ChangeHighlight.")
+    parser.add_argument("--flagged", default=None,
+                         help="Optional: a Stage 6 (Classify) output .ply. Adds "
+                              "/World/Compartment/FlaggedPoints with only its flagged "
+                              "points (cluster_id >= 0, else classified = 1). For a Classify "
+                              "run with 'Keep all points', where Stage 7 meshes the whole "
+                              "surface for --change.")
+    parser.add_argument("--clusters", default=None,
+                         help="Optional: m3c2_classify.py's <name>.clusters.json - adds one "
+                              "marker per damage site (/World/Compartment/DamageSites), with "
+                              "its point count and magnitudes as 'delta:' attributes.")
+    parser.add_argument("--surfaces", default=None,
+                         help="Optional, with --clusters: a Stage 4 (Segment) cloud "
+                              "(<name>_classified.ply or <name>_envelope_filtered.ply) of "
+                              "the diff's reference scan. Each damage site gets the surface "
+                              "it sits on (wall_2, floor, ...), from the manifest.json "
+                              "beside that file.")
     parser.add_argument("--output", required=True, help="Output .usd/.usda path")
     parser.add_argument("--usdz", action="store_true",
                          help="Also package the result as a .usdz (same name, .usdz extension) "
@@ -329,9 +644,43 @@ def main():
                               "by default (no downsampling).")
     args = parser.parse_args()
 
+    summary = None
+    if args.clusters:
+        # Read before anything is written, so a bad file fails the run cleanly.
+        try:
+            summary = load_clusters(args.clusters)
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            return 1
+    if args.surfaces:
+        if summary is None:
+            print("ERROR: --surfaces needs --clusters (the surfaces label the damage sites).")
+            return 1
+        print(f"Reading surfaces: {args.surfaces}")
+        try:
+            surface_cloud = load_surface_cloud(args.surfaces)
+        except (ValueError, OSError) as e:
+            print(f"ERROR: {e}")
+            return 1
+        site_points = find_site_points(args.clusters, summary)
+        method = ("the Classify points" if site_points is not None
+                  else "the site boxes (Classify output not found beside the summary)")
+        n_labelled = label_sites(summary, surface_cloud, site_points)
+        summary["surface_source"] = str(args.surfaces)
+        print(f"  {n_labelled} of {len(summary['clusters'])} damage site(s) labelled, "
+              f"from {method}.")
+        for cluster in summary["clusters"]:
+            if cluster.get("surface") is not None:
+                print(f"    site {cluster.get('cluster_id')}: {cluster['surface']} "
+                      f"({cluster['surface_share'] * 100:.0f}% of its points)")
+
     stage = Usd.Stage.CreateNew(args.output)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
-    UsdGeom.Xform.Define(stage, "/World")
+    # All positions are in metres. Without this, USD readers use their
+    # default of 0.01 m per unit (centimetres).
+    UsdGeom.SetStageMetersPerUnit(stage, UsdGeom.LinearUnits.meters)
+    world = UsdGeom.Xform.Define(stage, "/World")
+    stage.SetDefaultPrim(world.GetPrim())
     UsdGeom.Xform.Define(stage, "/World/Compartment")
 
     print(f"Reading baseline: {args.baseline}")
@@ -349,6 +698,20 @@ def main():
         add_layer(stage, "/World/Compartment/DamageDetail", args.detail,
                   CHANGE_POINT_WIDTH, warn_if_missing=True, fallback_color=FALLBACK_HIGHLIGHT_COLOR,
                   voxel_size=args.voxel_size)
+
+    if args.flagged:
+        print(f"Reading flagged points: {args.flagged}")
+        add_flagged_layer(stage, "/World/Compartment/FlaggedPoints", args.flagged,
+                          voxel_size=args.voxel_size)
+
+    if summary is not None:
+        print(f"Reading damage sites: {args.clusters}")
+        n_sites = add_damage_sites(stage, "/World/Compartment/DamageSites", summary)
+        if n_sites:
+            print(f"  {n_sites} damage site marker(s) added.")
+        else:
+            print("  NOTE: the cluster summary has no damage sites - the DamageSites group "
+                  "is empty.")
 
     stage.GetRootLayer().Save()
     print(f"Saved USD scene to: {args.output}")

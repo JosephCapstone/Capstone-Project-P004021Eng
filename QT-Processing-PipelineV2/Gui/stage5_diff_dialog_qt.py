@@ -71,6 +71,18 @@ except ImportError:
     core = None
 
 
+
+def _outside_note(path):
+    """Report text for a Diff input: says if the points outside the room
+    (Stage 4's 'outside_envelope' junk) were removed or not."""
+    name = Path(str(path)).name
+    if name.endswith("_envelope_filtered.ply"):
+        return " (points outside the room removed)"
+    if name.endswith("_classified.ply"):
+        return (" (all points - points outside the room NOT removed. To remove them, "
+                "run Stage 4 with 'Also write a separate copy...' on)")
+    return ""
+
 class Stage5DiffFieldsMixin:
 
     def _build_diff_fields(self, pipeline=None):
@@ -100,6 +112,12 @@ class Stage5DiffFieldsMixin:
                 self.pipeline.project, self.pipeline.entry["comparison"]),
             extra_on_pick=self._on_comparison_picked)
         self.form = self._layout_stack.pop()
+        self.add_hint(
+            "For a Stage 4 (Segment) output, use the file marked 'outside-room points "
+            "removed' (<name>_envelope_filtered.ply). It does not have the scan noise and "
+            "the returns from beyond the walls, which can show as false damage. If you "
+            "choose <name>_classified.ply and the filtered copy exists, Run asks which one "
+            "to use.")
 
         rms_row = self._row("Registration RMS (cm, from Stage 3):")
         rms_edit = QLineEdit()
@@ -190,6 +208,8 @@ class Stage5DiffFieldsMixin:
         (start_stage()/finish_stage()), same as every other stage."""
         baseline = self.require_existing_file("baseline", "Baseline .ply")
         comparison = self.require("comparison", "Comparison .ply")
+        baseline = self._offer_envelope_filtered("baseline", baseline, "Baseline")
+        comparison = self._offer_envelope_filtered("comparison", comparison, "Comparison")
         params = self.require("params", "M3C2 params file")
         registration_rms = self.fields["registration_rms"].get().strip() or None
 
@@ -217,8 +237,8 @@ class Stage5DiffFieldsMixin:
         def build_report():
             summary = (
                 "=== SUMMARY ===\n"
-                f"Baseline: {baseline}\n"
-                f"Comparison: {comparison}\n"
+                f"Baseline: {baseline}{_outside_note(baseline)}\n"
+                f"Comparison: {comparison}{_outside_note(comparison)}\n"
                 f"Params file used: {params}\n"
                 + (f"Registration RMS on hand: {fmt_cm(registration_rms)}. If you used "
                    f"'Generate Params File...' above, this is already baked into the "
@@ -288,6 +308,30 @@ class Stage5DiffFieldsMixin:
         return cmd, build_report, finish_info
 
     # -- real, subprocess-free helpers (see module docstring) ---------------
+
+    def _offer_envelope_filtered(self, key, path, label):
+        """Update 6. If path is a Stage 4 (Segment) <name>_classified.ply
+        and the same pass also wrote <name>_envelope_filtered.ply (the
+        same points without the unclassified points outside the room),
+        asks which one to use. Yes puts the filtered copy in the field and
+        returns it. No keeps path. Any other file is returned as it is."""
+        sibling = pm.envelope_filtered_sibling(path) if pm is not None else None
+        if sibling is None:
+            return path
+        answer = QMessageBox.question(
+            self, "Use the copy without the points outside the room?",
+            f"{label} is a Stage 4 (Segment) cloud with all of its points:\n{path}\n\n"
+            f"The same pass also has a copy without the points outside the room:\n"
+            f"{sibling.name}\n\n"
+            "The points outside the room are scan noise and returns from beyond the "
+            "walls. In M3C2 they can show as false damage.\n\n"
+            "Yes: use the copy without these points (recommended).\n"
+            "No: use the file as it is.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if answer == QMessageBox.Yes:
+            self.fields[key].set(str(sibling))
+            return str(sibling)
+        return path
 
     def _on_comparison_picked(self, path):
         """Auto-fills Registration RMS from this pipeline's own

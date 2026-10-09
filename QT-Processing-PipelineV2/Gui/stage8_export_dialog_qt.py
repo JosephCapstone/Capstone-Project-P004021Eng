@@ -101,6 +101,42 @@ def _default_damage_detail_radius(pipeline):
     return f"{value:g}" if isinstance(value, (int, float)) else ""
 
 
+def _default_clusters_json(pipeline):
+    """Pre-fill for 'Damage sites (.clusters.json)': the cluster summary
+    m3c2_classify.py wrote next to this diff's recorded Classify output
+    (pipeline_core.classify_clusters_path()). "" when there is none -
+    manual mode, Classify not run yet, or clustering was off."""
+    if pipeline is None or pipeline.kind != "diff" or pm is None or core is None:
+        return ""
+    try:
+        output = (pipeline.entry.get("stages", {}).get("classify", {}) or {}).get("output")
+    except Exception:
+        return ""
+    if not output:
+        return ""
+    path = core.classify_clusters_path(pm.get_absolute_path(pipeline.project, output))
+    return str(path) if path.is_file() else ""
+
+
+def _default_surfaces(pipeline):
+    """Pre-fill for 'Surface labels (Stage 4 .ply)': the Stage 4 (Segment)
+    cloud of this diff's reference scan - see
+    pipeline_core.default_surfaces_for_diff(). "" when there is none
+    (manual mode, or the reference side has no Segment run)."""
+    if core is None:
+        return ""
+    return core.default_surfaces_for_diff(pipeline) or ""
+
+
+def _default_flagged(pipeline):
+    """Pre-fill for 'Flagged points (Classify .ply)': this diff's Classify
+    output, only when that run used 'Keep all points' - see
+    pipeline_core.default_flagged_for_diff(). "" otherwise."""
+    if core is None:
+        return ""
+    return core.default_flagged_for_diff(pipeline) or ""
+
+
 class Stage8ExportFieldsMixin:
 
     def _build_export_fields(self, pipeline=None):
@@ -114,9 +150,53 @@ class Stage8ExportFieldsMixin:
         self.add_project_picker_button(
             "baseline", lambda: pm.list_side_candidates(self.pipeline.project, "baseline"))
 
-        self.add_file_field("change", "Change-highlight .ply:", [("PLY files", "*.ply")])
+        change_edit = self.add_file_field(
+            "change", "Change-highlight .ply:", [("PLY files", "*.ply")])
         self.add_project_picker_button(
             "change", lambda: pm.list_eligible_inputs(self.pipeline, "export"))
+
+        self.add_file_field("flagged", "Flagged points (Classify .ply, optional):",
+                            [("PLY files", "*.ply")], default=_default_flagged(pipeline))
+        self.register_auto_default("flagged", _default_flagged)
+        self.add_project_picker_button(
+            "flagged", lambda: pm.list_eligible_inputs(self.pipeline, "surface"))
+        self.add_hint(
+            "Optional. A Stage 6 (Classify) output. The export adds the layer "
+            "/World/Compartment/FlaggedPoints with only its flagged points (in a damage "
+            "site, or above the threshold when clustering was off), coloured like the "
+            "change layer. Use it when Classify ran with 'Keep all points': Stage 7 then "
+            "makes a surface of all points for Change-highlight, and this layer shows only "
+            "the damage. In project mode, the app fills this field when the Classify run "
+            "of this diff used 'Keep all points'. Leave blank to export without this layer.")
+
+        self.add_file_field("clusters", "Damage sites (.clusters.json, optional):",
+                            [("Cluster summary", "*.clusters.json"), ("JSON files", "*.json")],
+                            default=_default_clusters_json(pipeline))
+        self.register_auto_default("clusters", _default_clusters_json)
+        change_edit.textChanged.connect(self._fill_clusters_from_change)
+        self.add_hint(
+            "Optional. The cluster summary that Stage 6 (Classify) writes next to its "
+            "output (<name>.clusters.json). The export adds one see-through box for each "
+            "damage site at /World/Compartment/DamageSites: at the centre of the site, "
+            "with the size of the site, red for the largest change. Each box keeps its point "
+            "count and magnitudes as 'delta:' properties. In project mode, the app fills "
+            "this from the Classify output of this diff. Leave blank to export without "
+            "markers.")
+
+        self.add_file_field("surfaces", "Surface labels (Stage 4 Segment .ply, optional):",
+                            [("PLY files", "*.ply")], default=_default_surfaces(pipeline))
+        self.register_auto_default("surfaces", _default_surfaces)
+        self.add_project_picker_button(
+            "surfaces", lambda: pm.list_side_candidates(self.pipeline.project,
+                                                        self.pipeline.entry["reference"]))
+        self.add_hint(
+            "Optional. Used only with 'Damage sites'. A Stage 4 (Segment) output of the "
+            "reference scan of this diff (<name>_envelope_filtered.ply or "
+            "<name>_classified.ply). Each damage site then shows the surface it is on, for "
+            "example 'Site 03 - wall_2', with the 'delta:surface' property. The names come "
+            "from the manifest.json in the same folder. In project mode, the app fills this "
+            "with the reference cloud that Stage 5 used. Leave blank to export without "
+            "surface labels.")
 
         section_label = QLabel("Extract Damage Detail (optional, before exporting):")
         section_label.setStyleSheet("font-weight: bold;")
@@ -182,6 +262,19 @@ class Stage8ExportFieldsMixin:
 
         self.form.addStretch(1)
 
+    def _fill_clusters_from_change(self, change_path):
+        """If the Change input is a Classify output with a cluster summary
+        next to it, and 'Damage sites' is empty, fill it in - covers
+        manual mode, where there is no recorded Classify output."""
+        if self.fields["clusters"].get().strip() or core is None:
+            return
+        change_path = change_path.strip()
+        if not change_path:
+            return
+        candidate = core.classify_clusters_path(change_path)
+        if candidate.is_file():
+            self.fields["clusters"].set(str(candidate))
+
     def _build_run(self):
         """Real Run - matches open_export_dialog()'s build() in
         pipeline_applet.py, with the same correction as Stage 5: baseline
@@ -193,6 +286,24 @@ class Stage8ExportFieldsMixin:
         baseline = self.require_existing_file("baseline", "Baseline .ply")
         change = self.require("change", "Change-highlight .ply")
         detail = self.fields["detail"].get().strip() or None
+        clusters = self.fields["clusters"].get().strip() or None
+        if clusters and not Path(clusters).is_file():
+            raise ValueError(f"'Damage sites (.clusters.json)' points at a file that does "
+                             f"not exist:\n{clusters}\n\nClear the field to export without "
+                             f"markers.")
+        flagged = self.fields["flagged"].get().strip() or None
+        if flagged and not Path(flagged).is_file():
+            raise ValueError(f"'Flagged points' points at a file that does not exist:\n"
+                             f"{flagged}\n\nClear the field to export without this layer.")
+        flagged_same_as_change = bool(flagged) and \
+            Path(flagged).resolve() == Path(change).resolve()
+        if flagged_same_as_change:
+            flagged = None  # the change layer already shows these points
+        surfaces = self.fields["surfaces"].get().strip() or None
+        if surfaces and not Path(surfaces).is_file():
+            raise ValueError(f"'Surface labels' points at a file that does not exist:\n"
+                             f"{surfaces}\n\nClear the field to export without surface "
+                             f"labels.")
         output = self.require("output", "Output .usd")
         package_usdz = self.fields["package_usdz"].get()
         voxel_size = None
@@ -206,7 +317,9 @@ class Stage8ExportFieldsMixin:
         active_pipeline = self.get_active_pipeline_for_run()
         cmd = core.build_export_command(script, baseline, change, output,
                                          package_usdz=package_usdz, detail_ply=detail,
-                                         voxel_size=voxel_size, pipeline=active_pipeline)
+                                         voxel_size=voxel_size, clusters_json=clusters,
+                                         surfaces_ply=surfaces, flagged_ply=flagged,
+                                         pipeline=active_pipeline)
         finish_info = {"pipeline": active_pipeline, "stage_name": "export", "output": output}
 
         report = (
@@ -214,6 +327,14 @@ class Stage8ExportFieldsMixin:
             f"Baseline used: {baseline}\n"
             f"Change-highlight used: {change}\n"
             + (f"Damage detail used: {detail}\n" if detail else "No damage detail layer.\n")
+            + (f"Flagged points from: {flagged}\n" if flagged else
+               "Flagged points not used: the file is the same as the change input.\n"
+               if flagged_same_as_change else "")
+            + (f"Damage sites from: {clusters}\n" if clusters else
+               "No damage site markers.\n")
+            + (f"Surface labels from: {surfaces}\n" if (clusters and surfaces) else
+               "Surface labels not used: there are no damage sites to label.\n"
+               if surfaces else "")
             + (f"Downsampling: voxel size {fmt_cm(voxel_size)}\n" if voxel_size else
                "No downsampling.\n")
             + f"Script: {script}\n"
@@ -231,7 +352,15 @@ class Stage8ExportFieldsMixin:
             "should show the change regions colored blue (negative) to "
             "red (positive) by magnitude"
             + (", and .../DamageDetail should show the real current geometry "
-               "in the same colors. " if detail else ". ")
+               "in the same colors" if detail else "")
+            + (". .../FlaggedPoints shows only the flagged points; hide "
+               "ChangeHighlight in the Stage panel to see only the damage" if flagged else "")
+            + (". .../DamageSites has one see-through box per damage site - select a "
+               "Site_NN prim to see its point count and magnitudes under 'Raw USD "
+               "Properties'"
+               + (", and the surface it is on (delta:surface)" if surfaces else "")
+               + ". " if clusters else ". ")
+            + "The scene is in metres with Z up. "
             + "Use the .usdz instead for web/AR/mobile viewers."
         )
         return cmd, report, finish_info

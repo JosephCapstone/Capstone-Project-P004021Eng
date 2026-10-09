@@ -27,9 +27,11 @@ now hold more than one comparison scan and diff each one against more
 than one reference. See build_diff_command()'s docstring.
 """
 
+import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -1273,9 +1275,21 @@ def build_diff_command(baseline_ply, comparison_ply, m3c2_params_file, log_file=
         # pre-fill from stages.diff.params.normal_scale - the key path
         # both the Tkinter and Qt apps read. Before this, nothing
         # recorded it, so that pre-fill was always blank in both apps.
+        # reference_input / comparison_input (update 6): the two clouds
+        # this run actually used. Stage 8 reads reference_input to label
+        # damage sites with their Stage 4 surface (usd_export.py
+        # --surfaces). Project-relative when inside the project.
+        def _project_path(path):
+            try:
+                return project_manager.to_relative_path(pipeline.project, path)
+            except project_manager.ProjectError:
+                return str(path)
+
         project_manager.start_stage(pipeline, "diff", params={
             "m3c2_params_file": str(m3c2_params_file),
             "normal_scale": read_m3c2_normal_scale(m3c2_params_file),
+            "reference_input": _project_path(baseline_ply),
+            "comparison_input": _project_path(comparison_ply),
         })
 
     cmd = ["CloudCompare", "-SILENT"]
@@ -1368,6 +1382,14 @@ def build_classify_command(classify_script, input_ply, output_ply, threshold=Non
     return cmd
 
 
+def classify_clusters_path(output_ply):
+    """Where m3c2_classify.py writes its per-cluster summary for a given
+    Classify output: the same name with a '.clusters.json' extension.
+    resolve_classify_output() reads this file; Stage 8 passes it to
+    usd_export.py --clusters."""
+    return Path(output_ply).with_suffix(".clusters.json")
+
+
 def resolve_classify_output(output_ply):
     """
     Reads the '*.clusters.json' sidecar m3c2_classify.py writes next to
@@ -1380,7 +1402,7 @@ def resolve_classify_output(output_ply):
     disabled with cluster=False/--no-cluster, or the run failed before
     reaching Step D.
     """
-    summary_path = Path(output_ply).with_suffix(".clusters.json")
+    summary_path = classify_clusters_path(output_ply)
     if not summary_path.exists():
         return {}
     try:
@@ -1399,7 +1421,8 @@ def resolve_classify_output(output_ply):
 
 
 # ---------------------------------------------------------------------------
-# Stage 7: Surface (Open3D - reconstructs a mesh from a point cloud)
+# Stage 7: Surface (Open3D - reconstructs a mesh from a point cloud). The
+# Blender method has its own builder below: build_blender_surface_command().
 # ---------------------------------------------------------------------------
 
 def build_surface_command(surface_script, input_ply, output_ply, method="poisson",
@@ -1453,6 +1476,198 @@ def build_surface_command(surface_script, input_ply, output_ply, method="poisson
 
 
 # ---------------------------------------------------------------------------
+# Stage 7: Surface - Blender method (Geometry Nodes recipe in a .blend file)
+# ---------------------------------------------------------------------------
+
+BLENDER_ENV_VARS = ("DELTA_BLENDER", "BLENDER_EXE")
+
+
+def _blender_version_key(path):
+    """Sort key for an installed Blender, from its folder name - e.g.
+    '...\\Blender Foundation\\Blender 5.2\\blender.exe' -> (5, 2). Unknown
+    -> (0,), so a named version always wins over an unnamed folder."""
+    match = re.search(r"Blender[ _-]?(\d+)\.(\d+)", str(path), re.IGNORECASE)
+    return (int(match.group(1)), int(match.group(2))) if match else (0,)
+
+
+def find_blender_executable():
+    """
+    Returns the path of a Blender program to run Stage 7's Blender method
+    with, or None if none is found. Never raises - this only fills in a
+    default in the Stage 7 panel; the user can always browse to
+    blender.exe instead.
+
+    Search order:
+      1. The DELTA_BLENDER or BLENDER_EXE environment variable (a path to
+         the program), if it points at an existing file.
+      2. `blender` on PATH.
+      3. Standard install folders: on Windows, every
+         <Program Files>\\Blender Foundation\\Blender <version>\\blender.exe
+         (the NEWEST version wins - the D.E.L.T.A. .blend file is saved by
+         Blender 5.2), then the Steam install folder; on macOS, /Applications/Blender.app; on Linux,
+         /usr/bin/blender and /snap/bin/blender.
+    """
+    for name in BLENDER_ENV_VARS:
+        value = os.environ.get(name, "").strip().strip('"')
+        if value and Path(value).is_file():
+            return str(Path(value))
+
+    on_path = shutil.which("blender")
+    if on_path:
+        return on_path
+
+    candidates = []
+    if sys.platform.startswith("win"):
+        roots = {os.environ.get(v) for v in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)")}
+        roots.discard(None)
+        roots.add(r"C:\Program Files")
+        for root in roots:
+            candidates += glob.glob(os.path.join(root, "Blender Foundation", "Blender*",
+                                                 "blender.exe"))
+            candidates.append(os.path.join(root, "Steam", "steamapps", "common", "Blender",
+                                           "blender.exe"))
+    elif sys.platform == "darwin":
+        candidates += glob.glob("/Applications/Blender*.app/Contents/MacOS/Blender")
+    else:
+        candidates += [p for p in ("/usr/bin/blender", "/usr/local/bin/blender",
+                                   "/snap/bin/blender") if os.path.isfile(p)]
+    candidates = [c for c in candidates if os.path.isfile(c)]
+    if not candidates:
+        return None
+    return max(candidates, key=_blender_version_key)
+
+
+# Vertex properties that Blender's PLY importer does not keep under their
+# own names (position, normals, colours, texture coordinates) - they
+# cannot be carried by blender_surface.py.
+PLY_NON_CARRY_FIELDS = {"x", "y", "z", "nx", "ny", "nz", "red", "green", "blue", "alpha",
+                        "r", "g", "b", "a", "s", "t", "u", "v"}
+
+
+def split_field_names(value):
+    """None, 'a', 'a, b' or ['a', 'b'] -> ['a', 'b'] (unique, in order)."""
+    if not value:
+        return []
+    parts = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    names = []
+    for part in parts:
+        name = str(part).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def read_ply_vertex_fields(path):
+    """
+    Reads only the header of a .ply file (ASCII or binary) and returns its
+    vertex properties as [(name, ply_type), ...], in file order. Returns
+    None if the file is missing or is not a readable PLY. Fast for any
+    file size - it stops at 'end_header'.
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.readline().strip() != b"ply":
+                return None
+            fields = []
+            in_vertex = False
+            for _ in range(10000):
+                line = f.readline()
+                if not line:
+                    return None
+                words = line.decode("ascii", errors="replace").split()
+                if not words:
+                    continue
+                if words[0] == "end_header":
+                    return fields
+                if words[0] == "element":
+                    in_vertex = len(words) > 1 and words[1] == "vertex"
+                elif words[0] == "property" and in_vertex and len(words) >= 3 \
+                        and words[1] != "list":
+                    fields.append((words[-1], words[1]))
+    except OSError:
+        return None
+    return None
+
+
+def carryable_ply_fields(path):
+    """The vertex fields of a .ply that Stage 7 can carry onto the mesh
+    (every extra vertex property - not x/y/z, normals, colours or texture
+    coordinates). None if the header cannot be read."""
+    fields = read_ply_vertex_fields(path)
+    if fields is None:
+        return None
+    return [name for name, _type in fields if name.lower() not in PLY_NON_CARRY_FIELDS]
+
+
+def build_blender_surface_command(blender_exe, blend_file, blender_script, input_ply,
+                                  output_ply, object_name=None, overrides=None,
+                                  carry_field=None, pipeline=None):
+    """
+    Stage 7's Blender method: runs scripts/blender_surface.py inside
+    Blender, in the background (no Blender window), against a .blend file
+    that holds the surfacing recipe as a Geometry Nodes modifier
+    (configs/ExtraDownsampling.blend: stray-point removal, Points to
+    Volume, Volume to Mesh). See blender_surface.py's docstring for what
+    happens inside Blender. The output is a triangle-mesh .ply in the same
+    format surface_reconstruction.py writes, so Stage 8 (Export) reads it
+    unchanged.
+
+    overrides: optional {"Panel/Name": value} for the modifier's inputs,
+    e.g. {"Mesh/Voxel Size": 0.025}. Lengths in METRES (the GUI shows cm
+    and converts - see qt_stage_base.LengthFieldRef). An input not given
+    keeps the value saved in the .blend file. Passed as one
+    --set "Panel/Name=value" argument each.
+
+    carry_field: one field name, a comma-separated string, or a list of
+    names (update 9) - per-point fields of input_ply (usually
+    scalar_M3C2_distance, and cluster_id for a Classify output) copied
+    onto the mesh vertices by nearest original point. One --carry-field
+    argument per field. Recorded as params "carry_fields" (list) and
+    "carry_field" (the same names joined with ", ", for older readers).
+    Use carryable_ply_fields() to list what an input offers.
+
+    object_name: optional - which object in the .blend holds the
+    modifier. Default (None): the only object that has one.
+
+    Argument order matters for Blender: --python-exit-code must come
+    BEFORE --python, or a Python error inside Blender still exits 0 and
+    the app would record a failed run as complete. --factory-startup
+    ignores the user's own Blender preferences and add-ons, so every PC
+    runs the recipe the same way. The script's own arguments follow "--".
+
+    pipeline: optional project_manager.PipelineHandle for a DIFF pipeline
+    - start_stage("surface") tracking only, same as build_surface_command().
+    """
+    overrides = dict(overrides or {})
+    carry_fields = split_field_names(carry_field)
+    if pipeline is not None:
+        project_manager.start_stage(pipeline, "surface", params={
+            "method": "blender",
+            "blender": str(blender_exe),
+            "blend_file": str(blend_file),
+            "object": object_name,
+            "overrides": overrides,
+            "carry_field": ", ".join(carry_fields) or None,
+            "carry_fields": carry_fields,
+        })
+
+    cmd = [str(blender_exe), "--background", "--factory-startup",
+           "--python-exit-code", "1",
+           "--python", str(blender_script),
+           "--",
+           "--blend", str(blend_file),
+           "--input", str(input_ply),
+           "--output", str(output_ply)]
+    if object_name:
+        cmd += ["--object", str(object_name)]
+    for path, value in overrides.items():
+        cmd += ["--set", f"{path}={value}"]
+    for name in carry_fields:
+        cmd += ["--carry-field", name]
+    return cmd
+
+
+# ---------------------------------------------------------------------------
 # Stage 8: Export (USD) - delegates to an external script
 # ---------------------------------------------------------------------------
 
@@ -1479,6 +1694,7 @@ def build_damage_detail_command(detail_script, flagged_ply, comparison_ply, outp
 
 def build_export_command(export_script, baseline_ply, change_ply, output_usd,
                           package_usdz=False, detail_ply=None, voxel_size=None,
+                          clusters_json=None, surfaces_ply=None, flagged_ply=None,
                           pipeline=None):
     """
     Calls out to a separate Python script that does the actual PLY -> USD
@@ -1504,6 +1720,26 @@ def build_export_command(export_script, baseline_ply, change_ply, output_usd,
     you care about seeing - removes redundant near-duplicate points from
     overlapping scan passes, not real geometry. Off by default.
 
+    clusters_json: optional - m3c2_classify.py's <name>.clusters.json (the
+    per-damage-site summary Stage 6 writes next to its output). Passed as
+    --clusters; usd_export.py adds a /World/Compartment/DamageSites group
+    with one marker per site. Not a tracked stage output - the Stage 8
+    panel pre-fills it from this diff's recorded Classify output.
+
+    surfaces_ply: optional, only used with clusters_json (update 6) - a
+    Stage 4 (Segment) cloud of this diff's reference scan
+    (<name>_classified.ply or <name>_envelope_filtered.ply). Passed as
+    --surfaces; usd_export.py labels each damage site with the surface it
+    sits on (wall_2, floor, ...) from the manifest.json beside that file.
+    The Stage 8 panel pre-fills it with default_surfaces_for_diff().
+
+    flagged_ply: optional (update 7) - a Stage 6 (Classify) output.
+    Passed as --flagged; usd_export.py adds /World/Compartment/
+    FlaggedPoints with only its flagged points (cluster_id >= 0, else
+    classified = 1). For a Classify run with keep_all: Stage 7 meshes all
+    points for change_ply, and this layer shows only the damage. The
+    Stage 8 panel pre-fills it with default_flagged_for_diff().
+
     package_usdz: adds --usdz, which (in usd_export.py) also packages the
     result as a .usdz alongside the .usd - needed for most web/AR/mobile
     USD viewers, which often reject a raw .usd even when it's valid.
@@ -1523,6 +1759,9 @@ def build_export_command(export_script, baseline_ply, change_ply, output_usd,
             "package_usdz": package_usdz,
             "voxel_size": voxel_size,
             "detail_ply": str(detail_ply) if detail_ply else None,
+            "clusters_json": str(clusters_json) if clusters_json else None,
+            "surfaces_ply": str(surfaces_ply) if (surfaces_ply and clusters_json) else None,
+            "flagged_ply": str(flagged_ply) if flagged_ply else None,
         })
 
     cmd = [sys.executable, str(export_script),
@@ -1531,8 +1770,77 @@ def build_export_command(export_script, baseline_ply, change_ply, output_usd,
            "--output", str(output_usd)]
     if detail_ply:
         cmd += ["--detail", str(detail_ply)]
+    if flagged_ply:
+        cmd += ["--flagged", str(flagged_ply)]
+    if clusters_json:
+        cmd += ["--clusters", str(clusters_json)]
+        if surfaces_ply:
+            cmd += ["--surfaces", str(surfaces_ply)]
     if voxel_size:
         cmd += ["--voxel-size", str(voxel_size)]
     if package_usdz:
         cmd.append("--usdz")
     return cmd
+
+
+def is_segment_cloud(path):
+    """True if path is a Stage 4 (Segment) cloud with a 'classification'
+    field: <name>_classified.ply or <name>_envelope_filtered.ply."""
+    name = Path(str(path)).name
+    return name.endswith("classified.ply") or name.endswith("envelope_filtered.ply")
+
+
+def default_flagged_for_diff(pipeline):
+    """
+    The Classify output to show as flagged points in Stage 8
+    (usd_export.py --flagged), or None. Update 7.
+
+    Only when this diff's recorded Classify run used keep_all ('Keep all
+    points') and its output file exists: Stage 7 then meshes every point,
+    so the flagged points need their own layer. After a Classify run
+    without keep_all, the Stage 7 mesh already shows only the damage.
+    Never raises.
+    """
+    if pipeline is None or getattr(pipeline, "kind", None) != "diff":
+        return None
+    try:
+        classify = pipeline.entry["stages"].get("classify", {}) or {}
+        if not (classify.get("params") or {}).get("keep_all"):
+            return None
+        output = classify.get("output")
+        if not output:
+            return None
+        path = project_manager.get_absolute_path(pipeline.project, output)
+        return str(path) if Path(path).is_file() else None
+    except Exception:
+        return None
+
+
+def default_surfaces_for_diff(pipeline):
+    """
+    The Stage 4 (Segment) cloud to label this diff's damage sites with
+    (usd_export.py --surfaces), or None. Update 6.
+
+    First choice: the reference cloud that this diff's Stage 5 run
+    actually used (recorded as stages.diff.params.reference_input), when
+    it is a Segment cloud and the file still exists. M3C2's core points
+    are that cloud's own points, so the damage sites sit on its surfaces.
+    Second choice: project_manager.get_diff_inputs()'s reference side,
+    when that is a Segment output. Never raises.
+    """
+    if pipeline is None or getattr(pipeline, "kind", None) != "diff":
+        return None
+    try:
+        recorded = pipeline.entry["stages"].get("diff", {}).get("params", {}) \
+            .get("reference_input")
+        if recorded:
+            path = project_manager.get_absolute_path(pipeline.project, recorded)
+            if is_segment_cloud(path) and Path(path).is_file():
+                return str(path)
+        inputs = project_manager.get_diff_inputs(pipeline)
+        if inputs["reference_source_stage"] == "segment" \
+                and Path(inputs["reference_path"]).is_file():
+            return inputs["reference_path"]
+    except Exception:
+        return None
+    return None

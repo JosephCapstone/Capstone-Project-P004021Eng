@@ -333,7 +333,7 @@ class Ui_PipelineAppletWindow(object):
         self.stage1Button.setText(QCoreApplication.translate("PipelineAppletWindow", u"Stage 1: SLAM", None))
         self.stage2Button.setText(QCoreApplication.translate("PipelineAppletWindow", u"Stage 2: Level", None))
         self.stage3Button.setText(QCoreApplication.translate("PipelineAppletWindow", u"Stage 3: Cleanup", None))
-        self.stage4Button.setText(QCoreApplication.translate("PipelineAppletWindow", u"Stage 4: Segment", None))
+        self.stage4Button.setText(QCoreApplication.translate("PipelineAppletWindow", u"Stage 4: Segment (optional)", None))
         self.forcomp.setText(QCoreApplication.translate("PipelineAppletWindow", u"For Comparison", None))
         self.stage5Button.setText(QCoreApplication.translate("PipelineAppletWindow", u"Stage 5: Diff", None))
         self.stage6Button.setText(QCoreApplication.translate("PipelineAppletWindow", u"Stage 6: Classify", None))

@@ -32,7 +32,7 @@ Run standalone:
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm
 
@@ -82,6 +82,14 @@ class Stage4SegmentFieldsMixin:
 
     def _build_segment_fields(self, pipeline=None):
         self.add_pipeline_label(pipeline)
+        optional_note = QLabel(
+            "Optional stage. You can go from Stage 3 (Cleanup) directly to Stage 5 (Diff): "
+            "Stage 5 then uses the Stage 3 output. Without Stage 4, the points outside the "
+            "room are not removed, and Stage 8 cannot show surface names on the damage "
+            "sites.")
+        optional_note.setWordWrap(True)
+        optional_note.setStyleSheet("color: #b8860b; font-weight: bold;")
+        self.form.addWidget(optional_note)
 
         default_script = str(SCRIPTS_DIR / "segment_planes.py")
         self.add_file_field("script", "Segment script (.py):", [("Python files", "*.py")],
@@ -125,7 +133,7 @@ class Stage4SegmentFieldsMixin:
                               min_cm=0.5, max_cm=200)
         self.add_checkbox(
             "write_envelope_filtered",
-            "Also write a separate copy with outside-envelope points removed", default=False)
+            "Also write a separate copy with outside-envelope points removed", default=True)
         self.add_hint(
             "On by default. The detected floor/ceiling/wall points already describe the "
             "room's own footprint and height range - any unclassified point that falls "
@@ -138,9 +146,11 @@ class Stage4SegmentFieldsMixin:
             "counts as outside - a real wall's own points scatter a little around its "
             "true position, so some slack avoids flagging real clutter near a wall as "
             "junk; too large a value can let real outside junk through unflagged instead. "
-            "Check the separate-copy box to ALSO get <name>_envelope_filtered.ply - "
-            "<name>_classified.ply with the flagged points actually removed - for direct "
-            "downstream use without re-filtering by hand.")
+            "The separate-copy box (on by default) ALSO writes <name>_envelope_filtered.ply - "
+            "<name>_classified.ply with the flagged points actually removed. Stage 5 (Diff) "
+            "uses this copy, so the junk outside the room does not go into M3C2 and cannot "
+            "show as false damage. If no point is outside the room, the copy is not written "
+            "(it would be the same as <name>_classified.ply).")
 
         self.add_preset_selector("Distance threshold preset:", [
             ("Default (5 cm, 20 max planes) - tested combo for a full room/compartment scan",

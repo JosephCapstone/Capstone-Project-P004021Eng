@@ -31,7 +31,19 @@ Usage:
     python extract_damage_detail.py --flagged classified.ply \\
         --comparison comparison_cleaned.ply --output damage_detail.ply --radius 0.2
 
-STATUS: newly written, not yet run against real data.
+--flagged can be a Classify output with or without 'Keep all points'.
+With all points, only the flagged ones are used: cluster_id >= 0, or
+classified = 1 when there is no cluster_id.
+
+Output fields: x, y, z, scalar_M3C2_distance (the nearest flagged
+point's M3C2 distance) and, when --flagged has a 'cluster_id' field
+(m3c2_classify.py with clustering on), cluster_id (the nearest flagged
+point's damage site, so a detail point can be matched to its site).
+
+The distance field is named scalar_M3C2_distance - the name CloudCompare
+itself uses when it writes a PLY. A PLY property name cannot contain a
+space, so the earlier name 'M3C2 distance' made the write fail with
+"ValueError: space character(s) in name" every time (update 6 fix).
 """
 
 import argparse
@@ -82,8 +94,33 @@ def load_flagged(path):
         )
     positions = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=-1).astype(np.float64)
     values = np.asarray(vertex[field_name], dtype=np.float64)
-    print(f"  {len(positions)} flagged points, field '{field_name}'")
-    return positions, values
+    names = vertex.data.dtype.names or ()
+    cluster_ids = np.asarray(vertex["cluster_id"], dtype=np.int32) if "cluster_id" in names else None
+
+    # A Classify run with --keep-all writes every point, with flag fields.
+    # Use only the flagged points: cluster_id >= 0 (in a damage site), or
+    # classified = 1 when there is no cluster_id. Without this, every
+    # point of the surface counted as "flagged".
+    if cluster_ids is not None:
+        keep = cluster_ids >= 0
+        rule = "cluster_id >= 0"
+    elif "classified" in names:
+        keep = np.asarray(vertex["classified"]) == 1
+        rule = "classified = 1"
+    else:
+        keep = None
+    if keep is not None and not keep.all():
+        print(f"  {len(positions)} points in the file; using the {int(keep.sum())} "
+              f"flagged point(s) ({rule}).")
+        positions, values = positions[keep], values[keep]
+        if cluster_ids is not None:
+            cluster_ids = cluster_ids[keep]
+    if not len(positions):
+        raise ValueError(f"'{path}' has no flagged points - nothing to extract around.")
+
+    print(f"  {len(positions)} flagged points, field '{field_name}'"
+          + (", with cluster_id" if cluster_ids is not None else ""))
+    return positions, values, cluster_ids
 
 
 def load_comparison(path):
@@ -93,12 +130,6 @@ def load_comparison(path):
         raise ValueError(f"'{path}' has no vertex data.")
     vertex = ply["vertex"]
     positions = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=-1).astype(np.float64)
-    if len(positions) == 0:
-        raise ValueError(
-            f"'{path}' loaded but has zero points - nothing to extract geometry "
-            f"from. Check this is the right file (Stage 3's cleaned comparison "
-            f"output), not an empty or wrong-stage cloud."
-        )
     print(f"  {len(positions)} points")
     return positions
 
@@ -120,8 +151,12 @@ def main():
                               "scale the measurement itself was already working at.")
     args = parser.parse_args()
 
-    flagged_pos, flagged_values = load_flagged(args.flagged)
-    comparison_pos = load_comparison(args.comparison)
+    try:
+        flagged_pos, flagged_values, flagged_clusters = load_flagged(args.flagged)
+        comparison_pos = load_comparison(args.comparison)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        return 1
 
     try:
         from scipy.spatial import cKDTree
@@ -146,20 +181,17 @@ def main():
     extracted_pos = comparison_pos[keep_mask].astype(np.float32)
     carried_values = flagged_values[nearest_idx[keep_mask]].astype(np.float32)
 
-    # Underscore, not a literal space: a PLY property line is
-    # "property <type> <name>", whitespace-delimited, so a space inside
-    # the name breaks the header format. Matches the on-disk convention
-    # CloudCompare itself already uses for this exact field, which is
-    # why find_distance_field() (here, in m3c2_classify.py, and in
-    # usd_export.py) normalizes underscores back to spaces to find it -
-    # a downstream reader looking for "M3C2 distance" will find this
-    # field correctly via that same normalization.
-    field_name = "M3C2_distance"
+    # No spaces: a PLY property name with a space cannot be written.
+    field_name = "scalar_M3C2_distance"
     vertex_dtype = [("x", "f4"), ("y", "f4"), ("z", "f4"), (field_name, "f4")]
+    if flagged_clusters is not None:
+        vertex_dtype.append(("cluster_id", "i4"))
     vertex_data = np.zeros(len(extracted_pos), dtype=vertex_dtype)
     vertex_data["x"], vertex_data["y"], vertex_data["z"] = \
         extracted_pos[:, 0], extracted_pos[:, 1], extracted_pos[:, 2]
     vertex_data[field_name] = carried_values
+    if flagged_clusters is not None:
+        vertex_data["cluster_id"] = flagged_clusters[nearest_idx[keep_mask]]
 
     element = PlyElement.describe(vertex_data, "vertex")
     PlyData([element], text=False).write(args.output)
