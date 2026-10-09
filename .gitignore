@@ -2,6 +2,7 @@
 /build/
 /install/
 /log/
+/diagnostics
 
 # Python bytecode, caches, test output, and local environments
 __pycache__/
