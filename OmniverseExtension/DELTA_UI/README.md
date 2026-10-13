@@ -1,157 +1,47 @@
-# DELTA
+# DELTA version 05 — Isaac Sim
 
-DELTA opens a USD inspection scene in Isaac Sim. It can select a `Points` prim,
-show damage point coordinates, draw a red marker, and move the camera to the
-selected point.
+This build focuses on local Isaac Sim inspection and processing:
 
-## Requirements
+- Open USD scenes and navigate their primitives.
+- Inspect damage points and move the viewport camera to them.
+- Create baseline USD scenes from PLY point clouds.
+- Align and compare baseline and inspection PLY files, then open the resulting USD.
+- Choose Low, Medium, or High processing quality.
 
-- NVIDIA Isaac Sim 6.1.0
-- Windows 11 or supported Linux
-- Supported NVIDIA GPU and driver
+ROS 2, robot control, ROS topics, bag playback, and DB3 decoding are not part of this build. ROS bridge auto-start is explicitly disabled in `delta.robot.app.kit`.
 
-## Linux setup
+Processing starts from the DELTA USD Builder inside Isaac Sim. Native point-cloud processing runs in a separate Python worker to avoid the startup crash caused by loading those dependencies into Kit. Results open automatically in Isaac Sim.
 
-### Default folder location
+On Windows, set `ISAAC_SIM_ROOT` to the Isaac Sim 6.1 installation directory and run `DELTA_Ui_LAUNCHER.bat`.
 
-Put the extracted Isaac Sim and DELTA folders beside each other:
+Before using PLY processing, install the worker dependencies once with Isaac Sim's bundled Python (Python 3.12). From this directory in PowerShell:
 
-```text
-parent-folder/
-├── isaac-sim-standalone-6.1.0-linux-x86_64/
-└── DELTA_UI/
+```powershell
+$env:ISAAC_SIM_ROOT = 'C:\isaacsim'
+& "$env:ISAAC_SIM_ROOT\kit\python\python.exe" .\setup_worker.py
+.\DELTA_Ui_LAUNCHER.bat
 ```
 
-Run the Isaac Sim post-install script once:
+For Linux:
 
 ```bash
-cd /full/path/to/isaac-sim-standalone-6.1.0-linux-x86_64
-./post_install.sh
-```
-
-Make the DELTA launcher executable once:
-
-```bash
-cd "/full/path/to/DELTA_UI"
+export ISAAC_SIM_ROOT=/full/path/to/isaac-sim
+"$ISAAC_SIM_ROOT/python.sh" setup_worker.py
 chmod +x DELTA_Ui_LAUNCHER.sh
-```
-
-Launch DELTA:
-
-```bash
 ./DELTA_Ui_LAUNCHER.sh
 ```
 
-### Different Isaac Sim location
+Dependencies install into the ignored `worker-deps` directory. They are loaded only by the background worker. Linux has not been tested for this version.
 
-Set `ISAAC_SIM_ROOT` to the folder containing `kit/kit`:
+## Changing button text
 
-```bash
-ISAAC_SIM_ROOT="/full/path/to/isaac-sim" ./DELTA_Ui_LAUNCHER.sh
-```
+Search for `# BUTTON:` in the Python files below. Each comment explains the action, and the first string passed to the following `ui.Button` is the text shown on screen. Change that string to rename a button; `clicked_fn` points to the function that runs when clicked. Restart DELTA after editing.
 
-To change the saved default path, edit this line in `DELTA_Ui_LAUNCHER.sh`:
+Paths below are relative to `exts/delta.robot.ui/delta/robot/ui/`:
 
-```bash
-DEFAULT_ISAAC_SIM_ROOT="/full/path/to/isaac-sim"
-```
+| File | Buttons |
+| --- | --- |
+| `extension.py` in `_build_ui` | SELECT USD FILE, SELECT PRIM, CLEAR, VIEW DAMAGE POINT, OPEN USD BUILDER, REFRESH |
+| `usd_builder_window.py` in `_build_ui` | Browse for baseline, inspection, and output folder; Clear inspection; CREATE NEW BASELINE USD; CREATE DAMAGE COMPARISON USD |
 
-## Windows setup
-
-### Default folder location
-
-Extract Isaac Sim 6.1.0 here:
-
-```text
-C:\isaacsim
-```
-
-The executable should be located here:
-
-```text
-C:\isaacsim\kit\kit.exe
-```
-
-Run this file once:
-
-```text
-C:\isaacsim\post_install.bat
-```
-
-Double-click `DELTA_Ui_LAUNCHER.bat` to start DELTA.
-
-### Different Isaac Sim location
-
-Open Command Prompt in the DELTA folder and run:
-
-```bat
-set "ISAAC_SIM_ROOT=C:\full\path\to\isaac-sim"
-DELTA_Ui_LAUNCHER.bat
-```
-
-To change the saved default path, edit this line in `DELTA_Ui_LAUNCHER.bat`:
-
-```bat
-if not defined ISAAC_SIM_ROOT set "ISAAC_SIM_ROOT=C:\full\path\to\isaac-sim"
-```
-
-`ISAAC_SIM_ROOT` must point to the folder containing `kit\kit.exe`.
-
-## Using DELTA
-
-1. Select **SELECT USD FILE**.
-2. Open a `.usd`, `.usda`, or `.usdc` inspection file.
-3. Select the `Points` prim containing the damage data.
-4. Select one of the first five points.
-5. Read the world coordinates in the side panel.
-6. Select **VIEW DAMAGE POINT** to move the camera.
-
-The red box follows the selected point. The temporary camera is stored in the
-USD session layer and is not saved into the USD file.
-
-## Project files
-
-```text
-DELTA_UI/
-├── DELTA_Ui_LAUNCHER.bat
-├── DELTA_Ui_LAUNCHER.sh
-├── delta.robot.app.kit
-└── exts/delta.robot.ui/
-    ├── config/extension.toml
-    └── delta/robot/ui/
-        ├── __init__.py
-        ├── extension.py
-        └── damage_view.py
-```
-
-- `DELTA_Ui_LAUNCHER.bat`: Windows paths and launch command.
-- `DELTA_Ui_LAUNCHER.sh`: Linux paths and launch command.
-- `delta.robot.app.kit`: Application name and top-level dependencies.
-- `extension.toml`: Extension details and required Isaac Sim services.
-- `__init__.py`: Exposes the extension to Isaac Sim.
-- `extension.py`: Side panel, USD loading, prim selection, and point details.
-- `damage_view.py`: Red callout and camera transition.
-
-## Main settings
-
-The point preview limit is in `extension.py`:
-
-```python
-MAX_DAMAGE_POINTS = 5
-```
-
-The side panel size is set in `extension.py`:
-
-```python
-self._window = ui.Window(
-    "DELTA",
-    width=430,
-    height=620,
-)
-```
-
-The camera movement time is set in `damage_view.py`:
-
-```python
-def move_to(self, stage, target, distance, duration=1.2):
-```
+Section headings are strings in `ui.CollapsableFrame`; field labels are strings in `ui.Label`. Processing quality names appear in `QUALITY_PRESETS` in both `processing_worker.py` and `point_cloud_pipeline.py`; keep those names synchronized if editing them.

@@ -1,26 +1,22 @@
 #!/usr/bin/env bash
-# Linux launcher
 set -euo pipefail
 
-# Project and Isaac Sim paths
-PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_ISAAC_SIM_ROOT="$(dirname -- "$PROJECT_DIR")/isaac-sim-standalone-6.1.0-linux-x86_64"
-ISAAC_SIM_ROOT="${ISAAC_SIM_ROOT:-$DEFAULT_ISAAC_SIM_ROOT}"
+# Set ISAAC_SIM_ROOT externally to use a different Isaac Sim installation.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ISAAC_SIM_ROOT="${ISAAC_SIM_ROOT:-$SCRIPT_DIR/../isaac-sim-standalone-6.1.0-linux-x86_64}"
 KIT_EXECUTABLE="$ISAAC_SIM_ROOT/kit/kit"
 
-# Isaac Sim installation check
 if [[ ! -x "$KIT_EXECUTABLE" ]]; then
-    printf 'Isaac Sim 6.1.0 Kit executable not found: %s\n' "$KIT_EXECUTABLE" >&2
-    printf 'Set ISAAC_SIM_ROOT to your Isaac Sim 6.1.0 folder and try again.\n' >&2
+    echo "Isaac Sim 6.1 Kit executable not found: $KIT_EXECUTABLE" >&2
+    echo "Set ISAAC_SIM_ROOT to the Isaac Sim 6.1 installation folder." >&2
     exit 1
 fi
 
-# DELTA launch command
-exec "$KIT_EXECUTABLE" "$PROJECT_DIR/delta.robot.app.kit" \
+# Open the DELTA experience directly, without sourcing a ROS environment.
+exec "$KIT_EXECUTABLE" "$SCRIPT_DIR/delta.robot.app.kit" \
     --ext-folder "$ISAAC_SIM_ROOT/apps" \
     --ext-folder "$ISAAC_SIM_ROOT/exts" \
     --ext-folder "$ISAAC_SIM_ROOT/extscache" \
     --ext-folder "$ISAAC_SIM_ROOT/extsUser" \
     --ext-folder "$ISAAC_SIM_ROOT/extsDeprecated" \
-    --ext-folder "$PROJECT_DIR/exts" \
-    "$@"
+    --ext-folder "$SCRIPT_DIR/exts" "$@"

@@ -1,18 +1,16 @@
-# Extension details
 [package]
 title = "DELTA User Interface"
-description = "USD damage inspection interface for DELTA"
-version = "0.1.0"
+description = "Isaac Sim damage inspection and PLY-to-USD workflow"
+version = "0.5.0"
 category = "DELTA"
 
-# Extension dependencies
 [dependencies]
 "omni.kit.uiapp" = {}
 "omni.usd" = {}
 "omni.kit.window.filepicker" = {}
 "omni.kit.viewport.utility" = {}
 "omni.kit.window.title" = {}
+"omni.kit.pipapi" = {}
 
-# Python module
 [[python.module]]
 name = "delta.robot.ui"

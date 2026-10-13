@@ -1,20 +1,20 @@
-# Application details
 [package]
 title = "DELTA"
-description = "Custom Isaac Sim application for the DELTA project"
-version = "0.1.0"
+description = "Isaac Sim damage inspection and PLY-to-USD application"
+version = "0.5.0"
 
-# Application dependencies
 [dependencies]
 "isaacsim.exp.base.python" = {}
 "delta.robot.ui" = {}
 
-# Application settings
+[settings]
+# DELTA uses local PLY/USD workflows; do not auto-start a ROS bridge.
+isaac.startup.ros_bridge_extension = ""
+
 [settings.app]
 name = "DELTA"
-version = "0.1.0"
+version = "0.5.0"
 settings.persistent = true
 
-# Window title
 [settings.app.window]
 title = "DELTA"

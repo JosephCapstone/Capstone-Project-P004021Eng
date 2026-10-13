@@ -6,6 +6,9 @@ from omni.kit.viewport.utility import get_active_viewport, get_active_viewport_w
 from pxr import Gf, Sdf, Usd, UsdGeom
 
 
+# ---------- Viewport callout ----------
+
+
 class PointCallout:
     """Damage point screen marker."""
 
@@ -86,6 +89,9 @@ class PointCallout:
         self._scene_view = None
         self._rect = None
         self._transform = None
+
+
+# ---------- Camera navigation ----------
 
 
 class PointCameraNavigator:
