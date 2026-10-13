@@ -23,12 +23,14 @@ class PointCallout:
             self._on_update, name="DeltaDamagePointCallout"
         )
 
+    # Set the position of the damage marker.
     def set_point(self, position):
         """Callout target update."""
         self._world_position = Gf.Vec3d(*position) if position is not None else None
         if self._world_position is None and self._rect is not None:
             self._rect.visible = False
 
+    # Create the marker overlay in the viewport.
     def _ensure_overlay(self):
         """Viewport overlay setup."""
         if self._frame is not None:
@@ -105,6 +107,7 @@ class PointCameraNavigator:
         self._stage = None
         self._transform_op = None
 
+    # Start moving the camera towards the selected damage point.
     def move_to(self, stage, target, distance, duration=1.2):
         """Camera transition setup."""
         viewport = get_active_viewport()
@@ -174,6 +177,7 @@ class PointCameraNavigator:
         self._stage = None
         self._transform_op = None
 
+    # Restore the original camera view.
     def reset_view(self):
         """Perspective camera reset."""
         self.stop()

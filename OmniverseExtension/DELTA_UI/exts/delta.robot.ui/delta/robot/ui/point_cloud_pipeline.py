@@ -43,6 +43,7 @@ ADDITION_COLOR = np.array([0.02, 0.82, 1.0], dtype=np.float32)
 
 # ---------- Point-cloud processing ----------
 
+# Load the PLY and remove noise from the point cloud.
 def _load_and_refine(path, preset, report, label):
     report(f"Loading {label}: {path}")
     cloud = o3d.io.read_point_cloud(str(path))
@@ -61,6 +62,7 @@ def _load_and_refine(path, preset, report, label):
     return cloud
 
 
+# Align the inspection with the baseline and find changes.
 def _align_and_detect(baseline, inspection, preset, report):
     report("Aligning inspection to baseline")
     baseline_sample = baseline.voxel_down_sample(preset["registration_voxel"])
@@ -103,6 +105,7 @@ def _align_and_detect(baseline, inspection, preset, report):
 
 # ---------- USD creation ----------
 
+# Convert point coordinates to USD vectors.
 def _vec3_array(values):
     values = np.asarray(values, dtype=np.float32)
     try:
@@ -111,6 +114,7 @@ def _vec3_array(values):
         return Vt.Vec3fArray([tuple(value) for value in values])
 
 
+# Add a coloured point cloud to the USD scene.
 def _add_points(stage, path, positions, colors, width, signed_distance=None):
     points = UsdGeom.Points.Define(stage, path)
     points.CreatePointsAttr(_vec3_array(positions))
@@ -131,6 +135,7 @@ def _add_points(stage, path, positions, colors, width, signed_distance=None):
     return points
 
 
+# Choose colours for material loss and additions.
 def _damage_colors(values):
     values = np.asarray(values, dtype=np.float32)
     if not len(values):
@@ -145,6 +150,7 @@ def _damage_colors(values):
     return colors
 
 
+# Build the scene and save it as a USD file.
 def _write_usd(output_path, baseline, damage_positions, signed_distance, report):
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +187,7 @@ def _write_usd(output_path, baseline, damage_positions, signed_distance, report)
 
 # ---------- Public workflow ----------
 
+# Run refinement, comparison, and USD export.
 def build_usd(baseline_path, inspection_path, output_path, quality_name, report):
     if quality_name not in QUALITY_PRESETS:
         raise ValueError(f"Unknown quality preset: {quality_name}")

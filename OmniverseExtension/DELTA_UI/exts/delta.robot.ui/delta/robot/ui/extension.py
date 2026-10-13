@@ -113,6 +113,7 @@ class Extension(omni.ext.IExt):
         prim = stage.GetPrimAtPath(self._damage_prim_path)
         return prim if prim.IsValid() and prim.IsA(UsdGeom.Points) else None
 
+    # Read damage point positions from the USD scene.
     def _read_damage_points(self, stage):
         prim = self._get_damage_prim(stage)
         if prim is None:
@@ -165,16 +166,17 @@ class Extension(omni.ext.IExt):
             with ui.VStack(height=0, spacing=8):
                 ui.Label("DELTA", height=42, style={"font_size": 28})
 
+                # Show the current scene and USD file selector.
                 with ui.CollapsableFrame("USD Scene", collapsed=False, height=0):
                     with ui.VStack(height=0, spacing=6):
                         ui.Label(f"Current: {stage_name}", height=20, tooltip=stage_name)
-                        # BUTTON: Opens the USD file picker. Edit the next quoted string to rename this button.
                         ui.Button(
                             "SELECT USD FILE",
                             height=36,
                             clicked_fn=self._show_file_picker,
                         )
 
+                # Show scene objects and selection controls.
                 with ui.CollapsableFrame("Prim Navigator", collapsed=False, height=0):
                     with ui.VStack(height=0, spacing=6):
                         prim_names = self._all_prim_paths or ["No prims available"]
@@ -183,12 +185,11 @@ class Extension(omni.ext.IExt):
                             self._prim_combo.model.get_item_value_model()
                         )
                         with ui.HStack(height=34, spacing=6):
-                            # BUTTON: Selects the prim chosen above in the scene. The first string is the button text.
                             ui.Button("SELECT PRIM", clicked_fn=self._select_prim)
-                            # BUTTON: Clears the current prim selection. Edit "CLEAR" to change its caption.
                             ui.Button("CLEAR", width=90, clicked_fn=self._clear_prim)
 
                 with ui.CollapsableFrame(
+                    # Show the point-cloud source used for damage inspection.
                     "Automatic Damage Detection", collapsed=False, height=0
                 ):
                     with ui.VStack(height=0, spacing=6):
@@ -211,6 +212,7 @@ class Extension(omni.ext.IExt):
                             tooltip=self._damage_prim_path or "",
                         )
 
+                # Show damage coordinates and the camera view control.
                 with ui.CollapsableFrame("Damage Point", collapsed=False, height=0):
                     with ui.VStack(height=0, spacing=6):
                         names = [
@@ -231,7 +233,6 @@ class Extension(omni.ext.IExt):
                         self._damage_combo.model.get_item_value_model().add_value_changed_fn(
                             self._on_damage_point_changed
                         )
-                        # BUTTON: Marks the chosen damage point and moves the camera to it. Caption is below.
                         ui.Button(
                             "VIEW DAMAGE POINT",
                             height=36,
@@ -239,6 +240,7 @@ class Extension(omni.ext.IExt):
                             clicked_fn=self._view_selected_damage,
                         )
 
+                # Show the control that opens PLY processing.
                 with ui.CollapsableFrame("USD Creation", collapsed=False, height=0):
                     with ui.VStack(height=0, spacing=6):
                         ui.Label(
@@ -246,20 +248,19 @@ class Extension(omni.ext.IExt):
                             word_wrap=True,
                             height=34,
                         )
-                        # BUTTON: Opens the PLY processing window. Caption is below; clicked_fn names the action.
                         ui.Button(
                             "OPEN USD BUILDER",
                             height=38,
                             clicked_fn=self._show_builder,
                         )
 
+                # Explain the colours used in the scene.
                 with ui.CollapsableFrame("Colour Key", collapsed=True, height=0):
                     with ui.VStack(height=0, spacing=5):
                         ui.Label("Grey - baseline")
                         ui.Label("Red - material loss")
                         ui.Label("Cyan - new material")
 
-                # BUTTON: Rebuilds the panel from the current scene. Edit "REFRESH" to rename it.
                 ui.Button("REFRESH", height=34, clicked_fn=self._refresh_ui)
                 ui.Spacer(height=8)
 
@@ -340,6 +341,7 @@ class Extension(omni.ext.IExt):
     def _on_damage_point_changed(self, model):
         self._show_damage_details(model.as_int)
 
+    # Convert the selected point to world coordinates.
     def _selected_world_point(self):
         if self._selected_damage_index is None:
             return None
@@ -376,6 +378,7 @@ class Extension(omni.ext.IExt):
             self._callout = PointCallout()
         self._callout.set_point(world)
 
+    # Place the marker and move the camera to the selected point.
     def _view_selected_damage(self):
         world = self._selected_world_point()
         stage = omni.usd.get_context().get_stage()

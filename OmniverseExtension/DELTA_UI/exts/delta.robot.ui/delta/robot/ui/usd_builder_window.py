@@ -63,39 +63,37 @@ class UsdBuilderWindow:
                 height=44,
             )
 
+            # Show baseline and inspection file inputs.
             with ui.CollapsableFrame("1. Select point clouds", collapsed=False):
                 with ui.VStack(spacing=6):
                     ui.Label("Baseline PLY")
                     with ui.HStack(height=30, spacing=6):
                         ui.StringField(model=self._baseline_model)
-                        # BUTTON: Choose a baseline PLY file. Edit "Browse" for this button only.
                         ui.Button("Browse", width=90, clicked_fn=self._browse_baseline)
 
                     ui.Label("Inspection PLY - required only for comparison")
                     with ui.HStack(height=30, spacing=6):
                         ui.StringField(model=self._inspection_model)
-                        # BUTTON: Choose an inspection PLY file. Edit "Browse" for this button only.
                         ui.Button("Browse", width=90, clicked_fn=self._browse_inspection)
-                        # BUTTON: Removes the inspection file path. Edit "Clear" to rename this button.
                         ui.Button("Clear", width=70, clicked_fn=self._clear_inspection)
 
+            # Show the processing quality options.
             with ui.CollapsableFrame("2. Processing quality", collapsed=False):
                 self._quality_combo = ui.ComboBox(1, *QUALITY_PRESETS.keys())
                 self._quality_model = self._quality_combo.model.get_item_value_model()
 
+            # Show the output folder selector.
             with ui.CollapsableFrame("3. Output folder", collapsed=False):
                 with ui.HStack(height=30, spacing=6):
                     ui.StringField(model=self._output_model)
-                    # BUTTON: Choose the output folder. Edit "Browse" for this button only.
                     ui.Button("Browse", width=90, clicked_fn=self._browse_output)
 
+            # Show the baseline and comparison processing controls.
             with ui.HStack(height=48, spacing=8):
-                # BUTTON: Processes the baseline PLY alone and opens its USD. Edit the caption below.
                 ui.Button(
                     "CREATE NEW BASELINE USD",
                     clicked_fn=self._start_new_baseline,
                 )
-                # BUTTON: Aligns and compares both PLY files, then opens the USD. Caption is below.
                 ui.Button(
                     "CREATE DAMAGE COMPARISON USD",
                     clicked_fn=self._start_comparison,
@@ -176,6 +174,7 @@ class UsdBuilderWindow:
         output_text = self._output_model.as_string.strip()
         output_folder = Path(output_text) if output_text else None
 
+        # Check the input files before starting processing.
         if not baseline.is_file() or baseline.suffix.lower() != ".ply":
             self._set_status("Select an existing baseline PLY")
             return
@@ -196,6 +195,7 @@ class UsdBuilderWindow:
 
         self._log_lines = []
         self._set_status("Processing")
+        # Start processing in the background.
         self._future = self._executor.submit(
             build_usd,
             baseline,
@@ -205,6 +205,7 @@ class UsdBuilderWindow:
             self._messages.put,
         )
 
+    # Display processing messages and handle the finished result.
     def _on_update(self, _event):
         while True:
             try:
@@ -227,6 +228,7 @@ class UsdBuilderWindow:
         self._set_status(f"Complete - {result['damage_points']:,} damage points")
         asyncio.ensure_future(self._open_usd(result["output"]))
 
+    # Open the generated USD in Isaac Sim.
     async def _open_usd(self, path):
         result, error = await omni.usd.get_context().open_stage_async(path)
         if not result:

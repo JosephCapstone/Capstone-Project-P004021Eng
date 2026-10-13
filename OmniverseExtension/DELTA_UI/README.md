@@ -32,16 +32,3 @@ chmod +x DELTA_Ui_LAUNCHER.sh
 ```
 
 Dependencies install into the ignored `worker-deps` directory. They are loaded only by the background worker. Linux has not been tested for this version.
-
-## Changing button text
-
-Search for `# BUTTON:` in the Python files below. Each comment explains the action, and the first string passed to the following `ui.Button` is the text shown on screen. Change that string to rename a button; `clicked_fn` points to the function that runs when clicked. Restart DELTA after editing.
-
-Paths below are relative to `exts/delta.robot.ui/delta/robot/ui/`:
-
-| File | Buttons |
-| --- | --- |
-| `extension.py` in `_build_ui` | SELECT USD FILE, SELECT PRIM, CLEAR, VIEW DAMAGE POINT, OPEN USD BUILDER, REFRESH |
-| `usd_builder_window.py` in `_build_ui` | Browse for baseline, inspection, and output folder; Clear inspection; CREATE NEW BASELINE USD; CREATE DAMAGE COMPARISON USD |
-
-Section headings are strings in `ui.CollapsableFrame`; field labels are strings in `ui.Label`. Processing quality names appear in `QUALITY_PRESETS` in both `processing_worker.py` and `point_cloud_pipeline.py`; keep those names synchronized if editing them.

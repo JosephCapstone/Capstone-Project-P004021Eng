@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+# Set the processing options for each quality level.
 QUALITY_PRESETS = {
     "Low - fastest": {
         "voxel": 0.08,
@@ -35,6 +36,7 @@ QUALITY_PRESETS = {
 
 def build_usd(baseline_path, inspection_path, output_path, quality_name, report):
     worker = Path(__file__).with_name("processing_worker.py")
+    # Find the bundled Python interpreter on Windows or Linux.
     kit = Path(sys.executable).resolve().parent
     python = kit / "python" / "python.exe"
     if not python.is_file():
@@ -45,12 +47,14 @@ def build_usd(baseline_path, inspection_path, output_path, quality_name, report)
         python = kit / "python3"
     if not python.is_file():
         raise RuntimeError("Isaac Sim Python executable was not found")
+    # Keep Isaac Sim Python paths out of the worker environment.
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
     args = [str(python), "-I", "-u", str(worker), str(baseline_path),
             str(inspection_path) if inspection_path else "", str(output_path), quality_name]
     result = None
+    # Run processing in a separate process and collect its messages.
     with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, encoding="utf-8", errors="replace", env=env,
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)) as process:
@@ -61,11 +65,13 @@ def build_usd(baseline_path, inspection_path, output_path, quality_name, report)
             else:
                 report(line)
         code = process.wait()
+    # Report a failed worker instead of crashing Isaac Sim.
     if code or result is None:
         raise RuntimeError(f"Point-cloud worker failed (exit code {code}); see processing log")
     return result
 
 
+# Load processing libraries only inside the worker process.
 if __name__ == "__main__":
     root = Path(__file__).resolve().parents[5]
     deps = root / "worker-deps"
