@@ -57,11 +57,13 @@ automatically. Configuration can be overridden with:
 
 ## Camera feed
 
-The camera viewer starts with DeltaUI_Joseph and waits for the existing QBot
-**Start** action to bring the hardware online. It subscribes to the normal
-Jetson `/camera/color_image` topic; no compressed transport or camera controls
-are required. The WSL worker converts the latest raw RGB frame to PPM only for
-display in the Windows UI.
+The camera viewer starts with Delta and waits for the existing QBot **Start**
+action to bring the hardware online. The backend receives
+`/camera/color_image/compressed` through the QBot's existing Foxglove bridge at
+`ws://<jetson-host>:8765`, and the UI decodes the JPEG/PNG frames directly.
+The camera reconnects automatically and does not depend on ROS discovery
+between the Jetson and WSL. Install `QBot_Platform/requirements.txt` in the
+Python environment running Delta; it includes `websocket-client`.
 
 ## Mapping controls
 

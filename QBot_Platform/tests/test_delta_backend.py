@@ -48,6 +48,9 @@ class FakeWorker:
         self.camera_calls += 1
         return self.camera_version, self.camera_data
 
+    def close(self):
+        pass
+
     def post(self, path, payload=None):
         self.posts.append((path, payload))
 
@@ -97,11 +100,14 @@ class DeltaBackendTest(unittest.TestCase):
         self.worker = FakeWorker()
         self.jetson = FakeJetson()
         self.config = BackendConfig(
+            lidar_type="ouster",
+            ros_domain_id=7,
             windows_map_directory=Path(self.temporary.name) / "maps"
         )
         self.backend = DeltaBackend(
             config=self.config,
             worker_client=self.worker,
+            camera_client=self.worker,
             jetson_client=self.jetson,
             start_monitor=False,
         )
@@ -145,7 +151,7 @@ class DeltaBackendTest(unittest.TestCase):
         self.backend.launch_script()
         wait_for(lambda: bool(self.jetson.commands))
         command = self.jetson.commands[0]
-        self.assertIn("setsid --fork ./run_qbot.sh", command)
+        self.assertIn("setsid --fork bash ./run_qbot.sh", command)
         self.assertIn("ROS_DOMAIN_ID=7", command)
         self.assertEqual(self.backend.get_state()["qbot"]["state"], "starting")
 
@@ -169,6 +175,7 @@ class DeltaBackendTest(unittest.TestCase):
         backend = DeltaBackend(
             config=self.config,
             worker_client=self.worker,
+            camera_client=self.worker,
             jetson_client=self.jetson,
             process_runner=runner,
             start_monitor=False,
@@ -228,6 +235,7 @@ class DeltaBackendTest(unittest.TestCase):
         backend = DeltaBackend(
             config=self.config,
             worker_client=self.worker,
+            camera_client=self.worker,
             jetson_client=jetson,
             start_monitor=True,
         )
@@ -245,6 +253,7 @@ class DeltaBackendTest(unittest.TestCase):
         backend = DeltaBackend(
             config=self.config,
             worker_client=self.worker,
+            camera_client=self.worker,
             jetson_client=jetson,
             start_monitor=True,
         )

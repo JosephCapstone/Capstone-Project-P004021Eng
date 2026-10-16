@@ -285,9 +285,7 @@ class DeltaUI(QMainWindow):
         mapping = state.get("mapping", {})
         mapping_state = mapping.get("mapping", "unavailable")
         visualization_state = state.get("visualization", {}).get("state", "unknown")
-        camera_age = mapping.get("topic_ages", {}).get(
-            "/camera/color_image"
-        )
+        camera_age = state.get("camera", {}).get("age")
         camera_topic_fresh = camera_age is not None and camera_age <= 2.0
 
         if not camera_topic_fresh and self.camera_topic_fresh:
@@ -314,7 +312,7 @@ class DeltaUI(QMainWindow):
         )
         self.start_recording_button.setEnabled(
             recording_state in ("stopped", "error")
-            and qbot_state in ("running", "degraded")
+            and state.get("qbot", {}).get("recording_ready", False)
         )
         self.stop_recording_button.setEnabled(
             recording_state in ("starting", "recording", "degraded", "stopping")
@@ -364,7 +362,7 @@ class DeltaUI(QMainWindow):
         if not camera_data:
             return
         pixmap = QPixmap()
-        if pixmap.loadFromData(camera_data, "PPM"):
+        if pixmap.loadFromData(camera_data):
             self.camera_pixmap = pixmap
             self.camera_label.setText("")
             self.update_camera_scale()

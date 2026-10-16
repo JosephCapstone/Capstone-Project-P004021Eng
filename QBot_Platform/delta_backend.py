@@ -25,10 +25,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from delta_camera import FoxgloveCameraClient
+
 
 SAFE_RECORDING_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 SAFE_MAP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 JETSON_HOSTS = ("192.168.137.33", "192.168.0.157")
+HESAI_DRIVER_PATTERN = (
+    "[/]hesai_ros_driver/lib/hesai_ros_driver/"
+    "hesai_ros_driver_node([[:space:]]|$)"
+)
+HESAI_LAUNCH_PATTERN = r"[r]os2 launch hesai_ros_driver start\.py([[:space:]]|$)"
 
 
 def select_jetson_host(timeout: float = 0.75) -> str:
@@ -54,6 +61,24 @@ class BackendConfig:
     worker_url: str = "http://127.0.0.1:8766"
     worker_port: int = 8766
     windows_map_directory: Path = Path.home() / "Documents" / "DELTA Maps"
+    lidar_type: str = "hesai"
+
+    def __post_init__(self) -> None:
+        if self.lidar_type not in ("ouster", "hesai"):
+            raise ValueError("DELTA_LIDAR_TYPE must be 'ouster' or 'hesai'")
+
+    @property
+    def jetson_run_script(self) -> str:
+        return "run_qbot_h.sh" if self.lidar_type == "hesai" else "run_qbot.sh"
+
+    @property
+    def jetson_record_script(self) -> str:
+        return "run_record_h.sh" if self.lidar_type == "hesai" else "run_record.sh"
+
+    @property
+    def jetson_run_pattern(self) -> str:
+        script = self.jetson_run_script
+        return f"[{script[0]}]{re.escape(script[1:])}"
 
     @classmethod
     def from_environment(cls) -> "BackendConfig":
@@ -67,7 +92,8 @@ class BackendConfig:
             ros_workspace=os.environ.get(
                 "DELTA_ROS_WS", "/home/ernie/Capstone-Project-P004021Eng"
             ),
-            ## ros_domain_id=int(os.environ.get("DELTA_ROS_DOMAIN_ID", "0")),
+            ros_domain_id=int(os.environ.get("DELTA_ROS_DOMAIN_ID", "0")),
+            lidar_type=os.environ.get("DELTA_LIDAR_TYPE", cls.lidar_type).strip().lower(),
             worker_url=os.environ.get(
                 "DELTA_WORKER_URL", "http://127.0.0.1:8766"
             ).rstrip("/"),
@@ -132,7 +158,7 @@ class ParamikoJetsonClient:
     def __init__(self, config: BackendConfig) -> None:
         self.config = config
 
-    def run(self, command: str, timeout: float = 8.0) -> tuple[int, str, str]:
+    def run(self, command: str, timeout: float = 15.0) -> tuple[int, str, str]:
         try:
             import paramiko
         except ImportError as error:
@@ -167,20 +193,36 @@ class ParamikoJetsonClient:
 
     def probe(self, recording_name: Optional[str]) -> dict[str, Any]:
         lines = [
-            "pgrep -f '[r]un_qbot.sh' >/dev/null && echo qbot=1 || echo qbot=0",
+            f"pgrep -f {shlex.quote(self.config.jetson_run_pattern)} "
+            ">/dev/null && echo qbot=1 || echo qbot=0",
             "pgrep -f '[r]os2 bag record' >/dev/null && echo recording=1 || echo recording=0",
-            (
-                "pgrep -f '[t]opic_tools throttle messages /ouster/points 5.0 "
-                "/ouster/points_viz' >/dev/null && echo throttle=1 || echo throttle=0"
-            ),
         ]
-        if recording_name:
+        if self.config.lidar_type == "hesai":
+            driver_pattern = HESAI_DRIVER_PATTERN
             lines.append(
-                "test -d \"$HOME/ros2/bags/test_"
-                + recording_name
-                + "\" && du -sb \"$HOME/ros2/bags/test_"
-                + recording_name
-                + "\" | awk '{print \"recording_bytes=\"$1}' || "
+                f"pgrep -f {shlex.quote(driver_pattern)} >/dev/null && "
+                "echo hesai_driver=1 || echo hesai_driver=0"
+            )
+            data_probe = (
+                "source /opt/ros/humble/setup.bash && "
+                "source ~/ros2/install/setup.bash && "
+                f"export ROS_DOMAIN_ID={self.config.ros_domain_id} ROS_LOCALHOST_ONLY=0 && "
+                "(timeout 3s ros2 topic echo /lidar_points sensor_msgs/msg/PointCloud2 "
+                "--no-daemon --once --field header --qos-reliability best_effort "
+                "|| timeout 3s ros2 topic echo /lidar_packets hesai_ros_driver/msg/UdpFrame "
+                "--no-daemon --once --no-arr --qos-reliability best_effort)"
+            )
+            lines.append(
+                f"if pgrep -f {shlex.quote(driver_pattern)} >/dev/null && "
+                f"bash -c {shlex.quote(data_probe)} >/dev/null 2>&1; "
+                "then echo hesai_data=1; else echo hesai_data=0; fi"
+            )
+        if recording_name:
+            prefix = "test_hesai_" if self.config.lidar_type == "hesai" else "test_"
+            bag_directory = f'"$HOME/ros2/bags/{prefix}{recording_name}"'
+            lines.append(
+                f"test -d {bag_directory} && du -sb {bag_directory} "
+                "| awk '{print \"recording_bytes=\"$1}' || "
                 "echo recording_bytes=0"
             )
         command = "; ".join(lines)
@@ -203,10 +245,12 @@ class DeltaBackend:
         jetson_client: Optional[ParamikoJetsonClient] = None,
         process_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
         start_monitor: bool = True,
+        camera_client: Optional[FoxgloveCameraClient] = None,
     ) -> None:
         self.config = config or BackendConfig.from_environment()
         self.worker = worker_client or WorkerClient(self.config.worker_url)
         self.jetson = jetson_client or ParamikoJetsonClient(self.config)
+        self.camera = camera_client or FoxgloveCameraClient(self.config.jetson_host)
         self._process_runner = process_runner
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -222,8 +266,6 @@ class DeltaBackend:
         self._recording_name: Optional[str] = None
         self._recording_bytes = 0
         self._recording_bytes_changed_at = 0.0
-        self._managed_throttle = False
-        self._throttle_request_in_flight = False
         self._copy_in_flight = False
         self._copied_save_name: Optional[str] = None
         self._copy_retry_at = 0.0
@@ -232,6 +274,7 @@ class DeltaBackend:
         self._map_image: Optional[bytes] = None
         self._camera_version = -1
         self._camera_image: Optional[bytes] = None
+        self._camera_received_at: Optional[float] = None
         self._event_id = 0
         self._events: list[dict[str, Any]] = []
         self._state: dict[str, Any] = {
@@ -245,6 +288,7 @@ class DeltaBackend:
                 "bytes": 0,
                 "error": None,
             },
+            "camera": {"state": "waiting", "error": None},
             "visualization": {"state": "starting"},
             "mapping": {
                 "mapping": "unavailable",
@@ -319,15 +363,18 @@ class DeltaBackend:
     def _camera_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                version, camera_image = self.worker.camera_image()
+                version, camera_image = self.camera.camera_image()
                 with self._lock:
-                    if version != self._camera_version:
+                    if camera_image and version != self._camera_version:
                         self._camera_version = version
                         self._camera_image = camera_image
-            except Exception:
-                # Worker availability is reported by the main monitor. Camera
-                # polling stays independent so a slow frame cannot stall it.
-                pass
+                        self._camera_received_at = time.monotonic()
+                        self._state["camera"]["error"] = None
+                        continue
+            except Exception as error:
+                with self._lock:
+                    self._state["camera"]["error"] = str(error)
+                self._stop_event.wait(1.0)
             self._stop_event.wait(0.1)
 
     def _schedule_jetson_poll(self) -> None:
@@ -469,13 +516,14 @@ class DeltaBackend:
 
         process_running = bool(probe.get("qbot", 0))
         recorder_running = bool(probe.get("recording", 0))
-        throttle_running = bool(probe.get("throttle", 0))
         recording_bytes = int(probe.get("recording_bytes", 0))
         now = time.monotonic()
 
         with self._lock:
             topic_ages = self._state.get("mapping", {}).get("topic_ages", {})
-            stale_topics = [
+            stale_topics = (
+                [] if probe.get("hesai_data", 0) else ["/lidar_points", "/lidar_packets"]
+            ) if self.config.lidar_type == "hesai" else [
                 topic
                 for topic in (
                     "/ouster/scan",
@@ -485,14 +533,22 @@ class DeltaBackend:
                 if topic_ages.get(topic) is None or topic_ages.get(topic, 999.0) > 3.0
             ]
             previous_qbot = self._state["qbot"]["state"]
-            if process_running and not stale_topics:
+            if previous_qbot == "stopping":
+                still_running = process_running or (
+                    self.config.lidar_type == "hesai" and bool(probe.get("hesai_driver", 0))
+                )
+                if not still_running:
+                    qbot_state = "stopped"
+                elif now - self._qbot_stop_requested_at < 15.0:
+                    qbot_state = "stopping"
+                else:
+                    qbot_state = "degraded"
+            elif process_running and not stale_topics:
                 qbot_state = "running"
             elif process_running and now - self._qbot_requested_at < 90.0:
                 qbot_state = "starting"
             elif process_running:
                 qbot_state = "degraded"
-            elif previous_qbot == "stopping" and now - self._qbot_stop_requested_at < 15.0:
-                qbot_state = "stopping"
             elif previous_qbot == "starting" and now - self._qbot_requested_at < 10.0:
                 qbot_state = "starting"
             else:
@@ -501,7 +557,11 @@ class DeltaBackend:
                 "state": qbot_state,
                 "process_running": process_running,
                 "stale_topics": stale_topics,
-                "throttle_running": throttle_running,
+                "recording_ready": (
+                    bool(probe.get("hesai_driver", 0)) and qbot_state != "stopping"
+                    if self.config.lidar_type == "hesai"
+                    else qbot_state in ("running", "degraded")
+                ),
                 "error": None,
             }
 
@@ -529,12 +589,11 @@ class DeltaBackend:
                 "error": None,
             }
 
-        if process_running and not throttle_running and not self._throttle_request_in_flight:
-            self._throttle_request_in_flight = True
-            self._executor.submit(self._ensure_throttle)
-
         if previous_qbot != qbot_state:
-            self._record_event(f"QBot state verified as {qbot_state}")
+            self._record_event(
+                "QBot started" if qbot_state == "running"
+                else f"QBot state verified as {qbot_state}"
+            )
 
     def _run_jetson_action(self, description: str, command: str) -> None:
         try:
@@ -552,7 +611,8 @@ class DeltaBackend:
         command = (
             "cd /home/nvidia && "
             f"export ROS_DOMAIN_ID={self.config.ros_domain_id} ROS_LOCALHOST_ONLY=0 && "
-            "setsid --fork ./run_qbot.sh >/tmp/delta_run_qbot.log 2>&1 </dev/null"
+            f"setsid --fork bash ./{self.config.jetson_run_script} "
+            ">/tmp/delta_run_qbot.log 2>&1 </dev/null"
         )
         self._record_event("QBot start requested")
         self._executor.submit(self._run_jetson_action, "QBot start", command)
@@ -561,35 +621,21 @@ class DeltaBackend:
         with self._lock:
             self._qbot_stop_requested_at = time.monotonic()
             self._state["qbot"]["state"] = "stopping"
-        throttle_stop = ""
-        if self._managed_throttle:
-            throttle_stop = (
-                "; pkill -INT -f '[t]opic_tools throttle messages /ouster/points "
-                "5.0 /ouster/points_viz' || true"
+        command = f"pkill -INT -f {shlex.quote(self.config.jetson_run_pattern)} || true"
+        if self.config.lidar_type == "hesai":
+            pattern = shlex.quote(
+                f"({self.config.jetson_run_pattern}|{HESAI_LAUNCH_PATTERN}|{HESAI_DRIVER_PATTERN})"
             )
-        command = "pkill -INT -f '[r]un_qbot.sh' || true" + throttle_stop
+            command = (
+                "for stop_signal in INT TERM KILL; do "
+                f"pkill -$stop_signal -f {pattern} || true; "
+                "for stop_attempt in 1 2 3; do "
+                f"if ! pgrep -f {pattern} >/dev/null; then exit 0; fi; "
+                "sleep 1; done; done; "
+                "echo 'Hesai processes did not stop' >&2; exit 1"
+            )
         self._record_event("QBot stop requested")
         self._executor.submit(self._run_jetson_action, "QBot stop", command)
-
-    def _ensure_throttle(self) -> None:
-        command = (
-            "source /opt/ros/humble/setup.bash && "
-            "source ~/ros2/install/setup.bash && "
-            f"export ROS_DOMAIN_ID={self.config.ros_domain_id} ROS_LOCALHOST_ONLY=0 && "
-            "setsid --fork ros2 run topic_tools throttle messages /ouster/points 5.0 "
-            "/ouster/points_viz --ros-args -p lazy:=false "
-            ">/tmp/delta_points_throttle.log 2>&1 </dev/null"
-        )
-        try:
-            status, output, error = self.jetson.run(command)
-            if status != 0:
-                raise RuntimeError(error or output or f"remote command exited with {status}")
-            self._managed_throttle = True
-            self._record_event("Jetson point-cloud throttle start requested")
-        except Exception as error:
-            self._record_event(f"Point-cloud throttle could not start: {error}", "error")
-        finally:
-            self._throttle_request_in_flight = False
 
     def start_recording(self, recording_name: str) -> None:
         name = self.validate_recording_name(recording_name)
@@ -604,7 +650,8 @@ class DeltaBackend:
         command = (
             "cd /home/nvidia && "
             f"export ROS_DOMAIN_ID={self.config.ros_domain_id} ROS_LOCALHOST_ONLY=0 && "
-            f"setsid --fork ./run_record.sh {name} >/tmp/delta_record_{name}.log "
+            f"setsid --fork bash ./{self.config.jetson_record_script} {name} "
+            f">/tmp/delta_record_{name}.log "
             "2>&1 </dev/null"
         )
         self._record_event(f"Recording {name} start requested")
@@ -717,7 +764,16 @@ class DeltaBackend:
 
     def get_state(self) -> dict[str, Any]:
         with self._lock:
-            return copy.deepcopy(self._state)
+            state = copy.deepcopy(self._state)
+            age = (
+                None if self._camera_received_at is None
+                else time.monotonic() - self._camera_received_at
+            )
+            state["camera"]["age"] = age
+            state["camera"]["state"] = (
+                "streaming" if age is not None and age <= 2.0 else "waiting"
+            )
+            return state
 
     def get_map(self) -> tuple[int, Optional[bytes]]:
         with self._lock:
@@ -729,6 +785,7 @@ class DeltaBackend:
 
     def close(self) -> None:
         self._stop_event.set()
+        self.camera.close()
         if self._monitor_thread is not None:
             self._monitor_thread.join(timeout=1.0)
         if self._camera_thread is not None:
