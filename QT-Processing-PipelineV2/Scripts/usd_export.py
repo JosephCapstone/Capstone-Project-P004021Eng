@@ -35,6 +35,15 @@ Scene layout:
                              (see add_damage_sites()). With --surfaces, each
                              site also gets the surface it sits on (wall_2,
                              floor, ...) from Stage 4 (Segment).
+                             When Stage 6 ran with "Find holes", each site
+                             also has a type: added (red box), removed (blue
+                             box) or hole (purple box, with its size).
+
+Colours: the layers are coloured by the M3C2 field. When the Stage 6 output
+has a 'change_inward' field (Stage 6 with "Find holes"), that field is used
+instead: its sign has the same meaning on every wall (red = material added,
+blue = material removed), and the points of a hole show as removed. See
+find_color_field().
 
 Units and axes: the stage is written in metres (metersPerUnit = 1) with
 Z up, and /World is the default prim. Without metersPerUnit, a USD reader
@@ -123,6 +132,20 @@ def find_distance_field(vertex):
     return fallback[0] if fallback else None
 
 
+def find_color_field(vertex):
+    """
+    The field that colours a layer. 'change_inward' (written by Stage 6 with
+    "Find holes") comes first: M3C2 itself gives a sign that changes from one
+    wall to the opposite wall, because CloudCompare turns all normals to one
+    fixed direction. change_inward has the same meaning on every surface and
+    also has a value for the points of a hole. Without it, this is the M3C2
+    distance field, as before.
+    """
+    if "change_inward" in (vertex.data.dtype.names or ()):
+        return "change_inward"
+    return find_distance_field(vertex)
+
+
 def read_ply_data(path, warn_if_missing=False):
     """
     Returns (positions Nx3 float32, scalar_field N float32 or None,
@@ -152,7 +175,7 @@ def read_ply_data(path, warn_if_missing=False):
     ).astype(np.float32)
 
     scalar_field = None
-    field_name = find_distance_field(vertex)
+    field_name = find_color_field(vertex)
     if field_name:
         scalar_field = np.asarray(vertex[field_name], dtype=np.float32)
         print(f"  Using scalar field '{field_name}' for coloring.")
@@ -359,7 +382,7 @@ def select_flagged(path):
     else:
         keep = np.ones(len(positions), dtype=bool)
         rule = "all points (no flag field)"
-    field_name = find_distance_field(vertex)
+    field_name = find_color_field(vertex)
     scalar_field = (np.asarray(vertex[field_name], dtype=np.float32)[keep]
                     if field_name else None)
     return positions[keep], scalar_field, rule
@@ -519,11 +542,26 @@ def label_sites(summary, surface_cloud, site_points=None):
     return n_labelled
 
 
-def _site_color(max_magnitude, largest):
+HOLE_SITE_COLOR = (0.55, 0.15, 0.85)           # purple - a hole has no M3C2 magnitude
+UNMATCHED_SITE_COLOR = (0.10, 0.70, 0.65)      # teal - no partner in the other scan (moved or absent object)
+
+
+def _site_color(max_magnitude, largest, site_type=None):
     """Pale orange (small change) to strong red (largest change in this
     file) - sites are ranked against each other, not against a fixed
-    distance, the same idea as diverging_colormap()."""
+    distance, the same idea as diverging_colormap(). A removed site uses
+    the same scale in blue (pale blue to strong blue), so the colour
+    matches ChangeHighlight (red = added, blue = removed). A hole is
+    always purple: it has no M3C2 distance to rank. An unmatched site (a
+    patch with no partner in the other scan: a moved or absent object) is
+    always teal, for the same reason."""
+    if site_type == "hole":
+        return Gf.Vec3f(*HOLE_SITE_COLOR)
+    if site_type == "unmatched":
+        return Gf.Vec3f(*UNMATCHED_SITE_COLOR)
     t = max(0.0, min(1.0, max_magnitude / largest)) if largest > 0 else 1.0
+    if site_type == "removed":
+        return Gf.Vec3f(0.2 * (1.0 - t), 0.75 * (1.0 - t), 1.0)
     return Gf.Vec3f(1.0, 0.75 * (1.0 - t), 0.2 * (1.0 - t))
 
 
@@ -547,6 +585,17 @@ def add_damage_sites(stage, prim_path, summary):
         (float, 0-1) - only when label_sites() found the site's surface.
         The site's display name then includes the surface, for example
         "Site 03 - wall_2".
+        delta:type (string: added, removed, changed, hole or unmatched) - only when
+        Stage 6 ran with "Find holes". The display name then includes it,
+        for example "Site 03 (hole) - wall_2". An unmatched site (a patch with
+        no partner in the other scan: a moved or absent object) is teal and,
+        like a hole, has size values and no M3C2 magnitude. A hole has no M3C2 magnitude,
+        so it has no delta:meanMagnitude / delta:maxMagnitude; it has
+        delta:width, delta:height, delta:thickness (m), delta:area (m2),
+        delta:ringValidFraction, delta:fillFraction and, when Stage 6 had
+        the projection radius, delta:correctedWidth, delta:correctedHeight
+        and delta:correctedArea. An added or removed site has
+        delta:meanChangeInward (m, + added, - removed).
 
     Returns the number of sites added.
     """
@@ -555,6 +604,11 @@ def add_damage_sites(stage, prim_path, summary):
     for key, attr, type_name in (("n_flagged", "delta:nFlagged", Sdf.ValueTypeNames.Int),
                                  ("n_confirmed", "delta:nConfirmed", Sdf.ValueTypeNames.Int),
                                  ("n_noise", "delta:nNoise", Sdf.ValueTypeNames.Int),
+                                 ("n_holes", "delta:nHoles", Sdf.ValueTypeNames.Int),
+                                 ("n_hole_points", "delta:nHolePoints", Sdf.ValueTypeNames.Int),
+                                 ("n_unmatched", "delta:nUnmatched", Sdf.ValueTypeNames.Int),
+                                 ("n_unmatched_points", "delta:nUnmatchedPoints",
+                                  Sdf.ValueTypeNames.Int),
                                  ("threshold", "delta:threshold", Sdf.ValueTypeNames.Float),
                                  ("source", "delta:source", Sdf.ValueTypeNames.String),
                                  ("surface_source", "delta:surfaceSource",
@@ -579,10 +633,22 @@ def add_damage_sites(stage, prim_path, summary):
             Gf.Vec3d(*centroid))
         prim.CreateAttribute("delta:extent", Sdf.ValueTypeNames.Float3).Set(Gf.Vec3f(*extent))
         for key, attr in (("mean_magnitude", "delta:meanMagnitude"),
-                          ("max_magnitude", "delta:maxMagnitude")):
+                          ("max_magnitude", "delta:maxMagnitude"),
+                          ("mean_change_inward", "delta:meanChangeInward"),
+                          ("width", "delta:width"), ("height", "delta:height"),
+                          ("thickness", "delta:thickness"), ("area", "delta:area"),
+                          ("ring_valid_fraction", "delta:ringValidFraction"),
+                          ("fill_fraction", "delta:fillFraction"),
+                          ("corrected_width", "delta:correctedWidth"),
+                          ("corrected_height", "delta:correctedHeight"),
+                          ("corrected_area", "delta:correctedArea")):
             if cluster.get(key) is not None:
                 prim.CreateAttribute(attr, Sdf.ValueTypeNames.Float).Set(float(cluster[key]))
+        site_type = cluster.get("type")
         display_name = f"Site {cluster_id:02d}"
+        if site_type is not None:
+            prim.CreateAttribute("delta:type", Sdf.ValueTypeNames.String).Set(str(site_type))
+            display_name += f" ({site_type})"
         if cluster.get("surface") is not None:
             prim.CreateAttribute("delta:surface", Sdf.ValueTypeNames.String).Set(
                 str(cluster["surface"]))
@@ -598,7 +664,8 @@ def add_damage_sites(stage, prim_path, summary):
         box.CreateSizeAttr(1.0)
         UsdGeom.XformCommonAPI(box).SetScale(Gf.Vec3f(*size))
         box.CreateDisplayColorPrimvar(UsdGeom.Tokens.constant).Set(
-            Vt.Vec3fArray([_site_color(float(cluster.get("max_magnitude", 0.0)), largest)]))
+            Vt.Vec3fArray([_site_color(float(cluster.get("max_magnitude", 0.0)), largest,
+                                       site_type)]))
         box.CreateDisplayOpacityPrimvar(UsdGeom.Tokens.constant).Set(
             Vt.FloatArray([SITE_OPACITY]))
     return len(clusters)

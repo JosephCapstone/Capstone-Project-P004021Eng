@@ -8,10 +8,9 @@ accumulated point cloud map (confirmed by inspecting real output: config,
 poses.npy, poses_kitti.txt, poses_tum.txt, result_metrics - no .ply/.pcd
 anywhere). This calls KissICP.register_frame() per frame in a loop, same
 as kiss-icp's own OdometryPipeline internally does, then extracts the
-fully accumulated map directly from the internal voxel hash map and
-writes it out as a .ply - giving Stage 1 the same kind of output
-ouster-cli's slam+save already provides, via a genuinely different SLAM
-backend/algorithm.
+fully accumulated map directly from a voxel hash map and writes it out as
+a .ply - giving Stage 1 the same kind of output ouster-cli's slam+save
+already provides, via a genuinely different SLAM backend/algorithm.
 
 Verified against the real installed kiss-icp 1.2.3 source (pipeline.py,
 kiss_icp.py, mapping.py - not guessed from docs):
@@ -21,8 +20,7 @@ kiss_icp.py, mapping.py - not guessed from docs):
     - kiss_icp.kiss_icp.KissICP(config).register_frame(frame, timestamps)
       runs one odometry step; the resulting pose lands at .last_pose
       afterward, and the frame gets folded into .local_map internally
-    - .local_map.point_cloud() returns the full accumulated map as an
-      Nx3 numpy array - this is what gets written out here
+    - .local_map.point_cloud() returns the local map as an Nx3 numpy array
 
 Requires:
     pip install kiss-icp plyfile numpy
@@ -68,24 +66,39 @@ this errors out, the console message says so directly - edit the config
 YAML's mapping.voxel_size by hand instead and drop --voxel-size for that
 run.
 
+WHICH MAP IS SAVED (changed 2026-10-14):
+data.max_range does TWO jobs in kiss-icp (verified against the kiss-icp
+1.2.3 source: kiss_icp.py, mapping.py, VoxelHashMap.cpp): it crops every
+frame, and VoxelHashMap::Update() deletes every local-map voxel farther
+than max_range from the robot's CURRENT position after each frame. The
+kiss-icp local map is therefore a ball around the robot, and the local map
+at the end of a run only holds points within data.max_range of the robot's
+FINAL position. On a path that ends where it started (a loop), the saved
+local map was a ball around the start, and the far end of a room that is
+longer than max_range was missing. That was the old default of this script.
+The default is now a separate global map: each registered frame is
+voxel-downsampled the same way kiss-icp does internally (voxel_size * 0.5),
+cropped to any map limit that is set (see below), moved into the world
+frame with the frame's pose, and added to a second kiss-icp VoxelHashMap
+(same voxel_size and max_points_per_voxel) that is never pruned. Output
+density per voxel follows the same rules as the local map. Registration
+uses data.max_range (the config's value, or the value of --max-range or
+--map-max-range), and each frame is cropped to data.max_range, so the
+global map reaches as far as the sensor saw from every pose on the path. --local-map gives the old output (the kiss-icp
+local map near the final position).
+
 --map-max-range (added 2026-09-23): removes points farther than this
-from the sensor from the SAVED map only. Registration still uses the
-config's data.max_range. Verified against the kiss-icp 1.2.3 source
-(kiss_icp.py, mapping.py, VoxelHashMap.cpp): data.max_range ALSO sets
-how far the local map reaches - VoxelHashMap::Update() deletes every
-voxel farther than max_range from the robot's CURRENT position after
-each frame. The default output below IS that local map, so it only
-holds points within data.max_range of the robot's FINAL position.
-Lowering data.max_range to cut open-space noise would therefore also
-cut the saved map. With --map-max-range, this script instead builds a
-separate global map: each registered frame is voxel-downsampled the
-same way kiss-icp does internally (voxel_size * 0.5), cropped to
---map-max-range in the sensor frame, moved into the world frame with
-the frame's pose, and added to a second kiss-icp VoxelHashMap (same
-voxel_size and max_points_per_voxel) that is never pruned. Output
-density per voxel therefore follows the same rules as the default path.
-Without --map-max-range, the output is unchanged (the local map).
-UNVERIFIED against a real capture - tested on synthetic frames only.
+from the sensor from the SAVED map only, measured in each frame from the
+sensor position of THAT frame (not from the start or the end of the
+path).
+CHANGED 2026-10-15: --map-max-range now also replaces the config's
+data.max_range for the run, so registration uses the same range. Before
+this change it cropped only the saved map and registration kept the
+config's range, so the setting looked like it did nothing to the SLAM.
+The range can now be larger than the config's value too. If --max-range is
+given as well, --max-range sets the registration range and --map-max-range
+only crops the saved map (the old behaviour). The horizontal and vertical
+limits below still crop the saved map only.
 
 --map-max-horizontal / --map-max-vertical (added 2026-09-23): the same
 saved-map-only crop as --map-max-range, but split into a horizontal
@@ -99,7 +112,7 @@ up axis at the START of the scan - robot pitch or roll during the scan
 does not tilt the limit, but a sensor that was already tilted at the
 start does (Stage 2 levels the map afterwards, not this crop). Any
 combination of the three limits can be given; a point must pass every
-limit that is set. Any of the three switches on the global-map path.
+limit that is set. These limits cannot be used with --local-map.
 UNVERIFIED against a real capture - tested on synthetic frames only.
 """
 
@@ -176,7 +189,9 @@ def main():
                               "'kiss_icp_dump_config') - use this to set voxel size and other "
                               "tuning parameters, which aren't exposed as flags here")
     parser.add_argument("--max-range", type=float, default=None,
-                         help="Override max sensor range from the config")
+                         help="Override max sensor range from the config (registration "
+                              "range). Takes priority over --map-max-range for the "
+                              "registration range.")
     parser.add_argument("--min-range", type=float, default=None,
                          help="Override min sensor range from the config (config.data.min_range, "
                               "left at kiss-icp's own default of 0.0 - no cropping - if omitted). "
@@ -195,10 +210,11 @@ def main():
                               "default, if no --config is given) - NOT YET CONFIRMED against a "
                               "real installed kiss-icp, see the module docstring's dated note")
     parser.add_argument("--map-max-range", type=float, default=None,
-                         help="Remove points farther than this (meters, from the sensor) "
-                              "from the SAVED map only. Registration still uses the config's "
-                              "data.max_range. Builds an unpruned global map instead of "
-                              "saving kiss-icp's local map - see the module docstring.")
+                         help="Maximum range in meters, from the sensor at the time of each "
+                              "frame. Replaces the config's data.max_range, so it sets the "
+                              "registration range AND the range of the saved map. If "
+                              "--max-range is also given, --max-range sets the registration "
+                              "range and this option only crops the saved map.")
     parser.add_argument("--map-max-horizontal", type=float, default=None,
                          help="Remove points whose HORIZONTAL distance from the sensor "
                               "(meters, map frame) is more than this, from the saved map only.")
@@ -206,6 +222,11 @@ def main():
                          help="Remove points whose VERTICAL distance from the sensor "
                               "(meters, map frame, above or below) is more than this, from "
                               "the saved map only.")
+    parser.add_argument("--local-map", action="store_true",
+                         help="Save kiss-icp's local map instead of the global map of all "
+                              "frames. The local map only holds points within data.max_range "
+                              "of the robot's FINAL position (the old default of this script). "
+                              "Cannot be used with the --map-max-* limits.")
     args = parser.parse_args()
 
     for flag, value in (("--map-max-range", args.map_max_range),
@@ -214,8 +235,14 @@ def main():
         if value is not None and value <= 0:
             print(f"ERROR: {flag} must be greater than 0.")
             return 1
-    use_global_map = any(v is not None for v in (
+    any_limit = any(v is not None for v in (
         args.map_max_range, args.map_max_horizontal, args.map_max_vertical))
+    if args.local_map and any_limit:
+        print("ERROR: --local-map cannot be used with --map-max-range, "
+              "--map-max-horizontal or --map-max-vertical. The local map is not built "
+              "from the registered frames, so these limits do not apply to it.")
+        return 1
+    use_global_map = not args.local_map
 
     try:
         from kiss_icp.config import load_config
@@ -243,7 +270,16 @@ def main():
         print("ERROR: no frames found - check --input and --dataloader.")
         return 1
 
-    config = load_config(args.config, max_range=args.max_range)
+    # --map-max-range replaces the config's data.max_range (registration range)
+    # unless --max-range is given. See the module docstring (2026-10-15).
+    registration_range = args.max_range if args.max_range is not None else args.map_max_range
+    config = load_config(args.config, max_range=registration_range)
+    if registration_range is not None:
+        source_flag = "--max-range" if args.max_range is not None else "--map-max-range"
+        print(f"  Registration max range set to {config.data.max_range} m by {source_flag} "
+              f"(overrides the config's data.max_range).")
+    else:
+        print(f"  Registration max range: {config.data.max_range} m (from the config).")
 
     if args.min_range is not None:
         try:
@@ -294,8 +330,12 @@ def main():
             limits.append(f"horizontal {args.map_max_horizontal} m")
         if args.map_max_vertical is not None:
             limits.append(f"vertical {args.map_max_vertical} m")
-        print(f"  Map limits: {', '.join(limits)} (saved map only - registration still "
-              f"uses data.max_range = {config.data.max_range} m)")
+        print("  Saving the global map of all frames (not pruned around the final position).")
+        print(f"  Map limits: {', '.join(limits) if limits else 'none'} "
+              f"(registration range is data.max_range = {config.data.max_range} m)")
+    else:
+        print(f"  Saving the kiss-icp local map: only points within data.max_range "
+              f"({config.data.max_range} m) of the robot's FINAL position (--local-map).")
 
     print("Running odometry...")
     report_every = max(1, n_frames // 20)
@@ -326,10 +366,11 @@ def main():
 
     if global_map is not None:
         total = kept_points + dropped_points
-        pct = (100.0 * dropped_points / total) if total else 0.0
-        print(f"Map limits removed {dropped_points} of {total} downsampled frame points "
-              f"({pct:.1f}%) before they reached the saved map.")
-        print("Extracting the accumulated map from the range-limited global map...")
+        if any_limit:
+            pct = (100.0 * dropped_points / total) if total else 0.0
+            print(f"Map limits removed {dropped_points} of {total} downsampled frame points "
+                  f"({pct:.1f}%) before they reached the saved map.")
+        print("Extracting the accumulated map from the global map...")
         points = global_map.point_cloud()
     else:
         print("Extracting the accumulated map from the local voxel map...")

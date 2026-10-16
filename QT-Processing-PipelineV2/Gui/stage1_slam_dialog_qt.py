@@ -30,7 +30,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox, QLabel
 
-from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, CONFIGS_DIR, fmt_cm
+from qt_stage_base import (QStageDialog, QStagePanel, SCRIPTS_DIR, CONFIGS_DIR, fmt_cm,
+                           LineEditRef)
 
 try:
     import project_manager as pm
@@ -41,6 +42,32 @@ try:
     import pipeline_core as core
 except ImportError:
     core = None
+
+
+class BackendMirroredRef(LineEditRef):
+    """One value, shown in two places: 'Map max range' has a text box in the
+    KISS-ICP section (next to the min range, the config's own max range and
+    the horizontal/vertical limits) and a text box in the Ouster CLI section
+    (the only crop that backend has). The two boxes always show the same text,
+    so the value stays when the Backend changes. get() reads the box of the
+    selected Backend and set() writes both, so the rest of the code uses
+    fields["map_max_range"] as before."""
+
+    def __init__(self, kiss_edit, ouster_edit, backend_getter):
+        self.kiss_edit = kiss_edit
+        self.ouster_edit = ouster_edit
+        self._backend_getter = backend_getter
+        kiss_edit.textChanged.connect(lambda text: self._copy(ouster_edit, text))
+        ouster_edit.textChanged.connect(lambda text: self._copy(kiss_edit, text))
+
+    @staticmethod
+    def _copy(target, text):
+        if target.text() != text:
+            target.setText(text)
+
+    @property
+    def widget(self):
+        return self.kiss_edit if self._backend_getter() == "kiss_icp" else self.ouster_edit
 
 
 class Stage1SlamFieldsMixin:
@@ -91,14 +118,8 @@ class Stage1SlamFieldsMixin:
         self.register_auto_default(
             "output", lambda p: self.resolve_project_output_default(p, "slam", ".ply"))
 
-        self.add_text_field("map_max_range", "Map max range (m, optional):")
-        self.add_hint(
-            "Optional. Use this value to remove far noise, for example in open areas. "
-            "The saved map does not include points that are farther than this distance "
-            "from the sensor. SLAM registration still uses the full sensor range. Set a "
-            "value a little larger than the distance from the robot path to the farthest "
-            "surface that you must keep. Leave blank to keep all points. Applies to both "
-            "backends.")
+        # 'Map max range' is not here any more: it sits with the other range
+        # limits inside each Backend's own section (see BackendMirroredRef).
 
         # Only the section for the selected Backend is visible - mirrors
         # begin_section()/end_section() + grid_remove()/grid() in the
@@ -114,6 +135,17 @@ class Stage1SlamFieldsMixin:
                               min_cm=1, max_cm=300)
         self.add_hint("Smaller = more detail but slower and larger output files. Start "
                        "with Medium unless you have a specific reason to change it.")
+        ouster_range_edit = self.add_text_field("_ouster_map_max_range",
+                                                "Map max range (m, optional):")
+        del self.fields["_ouster_map_max_range"]   # reached through fields["map_max_range"]
+        self.add_hint(
+            "Optional. Use this value to remove far noise, for example in open areas. "
+            "The saved map does not include points that are farther than this distance "
+            "from the sensor (ouster-cli 'clip' after 'slam'). SLAM registration still "
+            "uses the full sensor range. Set a value a little larger than the distance "
+            "from the robot path to the farthest surface that you must keep. Leave blank "
+            "to keep all points. This backend has no separate horizontal and vertical "
+            "limits.")
         self.add_checkbox("visualize", "Open visualizer after processing")
         self.end_section()
 
@@ -139,6 +171,10 @@ class Stage1SlamFieldsMixin:
         self.add_hint("Leave blank to use the config's own voxel_size, or kiss-icp's "
                        "built-in default if no config is given.")
 
+        range_heading = QLabel("Range limits")
+        range_heading.setStyleSheet("font-weight: bold; margin-top: 6px;")
+        self.form.addWidget(range_heading)
+
         self.kiss_min_range_label = QLabel()
         self.kiss_min_range_label.setWordWrap(True)
         self.form.addWidget(self.kiss_min_range_label)
@@ -152,11 +188,17 @@ class Stage1SlamFieldsMixin:
         self.kiss_max_range_label = QLabel()
         self.kiss_max_range_label.setWordWrap(True)
         self.form.addWidget(self.kiss_max_range_label)
+        kiss_range_edit = self.add_text_field("map_max_range", "Map max range (m, optional):")
         self.add_hint(
-            "Do not decrease max_range in the config to remove far noise. In KISS-ICP, "
-            "max_range also removes map points that are far from the robot, so the "
-            "saved map keeps only the area near the last robot position. Use 'Map max "
-            "range' above, or the horizontal and vertical limits below.")
+            "Optional. When you enter a value, it replaces the config's own max_range "
+            "(shown above this field) for this run. SLAM registration uses this range, and "
+            "the saved map does not include points that are farther than this distance from "
+            "the sensor. The distance is measured from the sensor position of each scan, "
+            "along the whole path. It is not measured from the start. A smaller value can "
+            "remove far noise, but SLAM then has less of the room to match. Leave this field "
+            "blank to use the config's own max_range. The saved map holds every scan, also "
+            "with a closed loop path. For more control of the saved map only, use the "
+            "horizontal and vertical limits below.")
 
         self.add_text_field("kiss_icp_map_max_horizontal",
                             "Map max horizontal distance (m, optional):")
@@ -168,15 +210,17 @@ class Stage1SlamFieldsMixin:
             "along the floor. The vertical distance is up or down. Use a horizontal limit "
             "to remove far noise in an open area and keep a high ceiling. Use a vertical "
             "limit to remove points far above or below the sensor. 'Vertical' is the up "
-            "direction of the sensor at the start of the scan. You can use these limits "
-            "together with 'Map max range'. A point must be in all of the limits that you "
-            "set.")
+            "direction of the sensor at the start of the scan. A point must be in all of "
+            "the limits that you set, including 'Map max range'.")
 
         self.add_text_field("kiss_icp_dataloader", "Force dataloader (optional):")
         self.add_text_field("kiss_icp_topic", "Rosbag topic (optional):")
         self.add_hint("Dataloader: leave blank to auto-detect from the source. Topic: "
                        "only needed if a rosbag has more than one PointCloud2 topic.")
         self.end_section()
+
+        self.fields["map_max_range"] = BackendMirroredRef(
+            kiss_range_edit, ouster_range_edit, lambda: self.fields["backend"].get())
 
         config_edit.textChanged.connect(self._update_kiss_icp_config_labels)
         self._update_kiss_icp_config_labels()  # populate for the bundled-config default
@@ -450,8 +494,14 @@ class Stage1SlamFieldsMixin:
                 raise ValueError("Map max range must be greater than 0, or blank.")
         else:
             map_max_range = None
-        map_max_range_line = (f"Map max range: {map_max_range} m (saved map only)\n"
-                              if map_max_range is not None else "Map max range: not used\n")
+        if backend == "kiss_icp":
+            map_max_range_line = (
+                f"Map max range: {map_max_range} m (replaces the config's max_range: "
+                f"used for SLAM registration and for the saved map)\n"
+                if map_max_range is not None else "Map max range: not used\n")
+        else:
+            map_max_range_line = (f"Map max range: {map_max_range} m (saved map only)\n"
+                                  if map_max_range is not None else "Map max range: not used\n")
 
         if backend == "kiss_icp":
             script = self.require("kiss_icp_script", "KISS-ICP script")

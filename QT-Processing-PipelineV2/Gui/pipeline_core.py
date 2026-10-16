@@ -186,6 +186,32 @@ def read_m3c2_normal_scale(params_file):
         return None
 
 
+def read_m3c2_search_scale(params_file):
+    """
+    Reads the SearchScale= value (the M3C2 projection scale, the DIAMETER
+    of the projection cylinder) out of a CloudCompare M3C2 params .txt. Half
+    of it is the projection radius that Stage 6's hole size correction
+    needs: M3C2 finds valid values up to that distance inside a hole, so a
+    measured hole is smaller than the real one by that radius on each side.
+    Returns a float, or None if the file is missing, unreadable, or has no
+    numeric SearchScale line. Never raises - same contract as
+    read_m3c2_normal_scale(): it only feeds a pre-fill, it never gates a run.
+    """
+    if not params_file:
+        return None
+    try:
+        text = Path(params_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"^\s*SearchScale\s*=\s*([-+0-9.eE]+)\s*$", text, re.MULTILINE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
 def run_streaming(cmd, on_line, on_done, cwd=None, on_process=None):
     """
     Run `cmd` in a background thread. Calls on_line(str) for each line of
@@ -674,12 +700,16 @@ def read_kiss_icp_max_range(config_path):
     RemovePointsFarFromLocation): data.max_range does TWO jobs in
     kiss-icp - it crops each frame, AND it deletes local-map voxels
     farther than max_range from the robot's CURRENT position after every
-    frame. slam_kiss_icp.py's default output is that local map, so
-    lowering data.max_range to cut open-space noise would also cut the
-    saved map down to a sphere around the robot's final position. Use
-    map_max_range (build_kiss_icp_slam_command()) for noise instead - it
-    crops only what goes into the saved map. See
-    _read_kiss_icp_config_value() for the None/never-raises contract.
+    frame. That local map only holds points near the robot's final
+    position. slam_kiss_icp.py no longer saves that local map by default
+    (since update 20 it saves a global map of all frames; --local-map gives
+    the old output). Lowering data.max_range shortens the range of every
+    frame, and so how far the saved map reaches from the path.
+    Since 2026-10-15 the Stage 1 "Map max range" field replaces this
+    value for the run (build_kiss_icp_slam_command() passes it as
+    --map-max-range, and slam_kiss_icp.py uses it as the registration
+    range). This function still gives the CONFIG file's own value.
+    See _read_kiss_icp_config_value() for the None/never-raises contract.
     """
     return _read_kiss_icp_config_value(config_path, "data", "max_range")
 
@@ -744,12 +774,15 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
     pattern as voxel_size above.
 
     map_max_range: optional, in meters - passed to slam_kiss_icp.py as
-    --map-max-range. Removes points farther than this from the sensor
-    from the SAVED map only; registration still uses the config's own
-    data.max_range. This is deliberately NOT an override of data.max_range:
-    see read_kiss_icp_max_range() for why lowering data.max_range would
-    also cut the saved map to a sphere around the robot's final position.
-    Recorded in project mode as "map_max_range" (None = not used).
+    --map-max-range. CHANGED 2026-10-15: this now REPLACES the config's
+    own data.max_range for the run. It sets the registration range and
+    it crops every frame, so it also limits the saved map. (Before this
+    change it cropped the saved map only, and registration kept the
+    config's range.) The horizontal and vertical limits below still crop
+    the saved map only. Recorded in project mode as "map_max_range"
+    (None = not used). The "max_range" param is the range that SLAM really
+    used: map_max_range when given, else the config's own value.
+    "max_range_overridden" tells which one it is.
 
     map_max_horizontal / map_max_vertical: optional, in meters - passed as
     --map-max-horizontal / --map-max-vertical. The same saved-map-only
@@ -793,7 +826,10 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
             "voxel_size_overridden": voxel_size is not None,
             "min_range": effective_min_range,
             "min_range_overridden": min_range is not None,
-            "max_range": read_kiss_icp_max_range(config),
+            "max_range": (map_max_range if map_max_range is not None
+                          else read_kiss_icp_max_range(config)),
+            "max_range_overridden": map_max_range is not None,
+            "config_max_range": read_kiss_icp_max_range(config),
             "map_max_range": map_max_range,
             "map_max_horizontal": map_max_horizontal,
             "map_max_vertical": map_max_vertical,
@@ -1071,8 +1107,38 @@ def resolve_segment_output(output_dir):
 # Stage 3: Cleanup (CloudCompare - SOR outlier removal, optional ICP align)
 # ---------------------------------------------------------------------------
 
+ICP_OVERLAP_MIN = 10
+ICP_OVERLAP_MAX = 100
+
+
+def parse_icp_overlap(text):
+    """Final overlap for ICP, in percent. Blank gives None (CloudCompare keeps
+    its own default). Otherwise a whole number from 10 to 100, else ValueError."""
+    if text is None:
+        return None
+    if isinstance(text, (int, float)) and not isinstance(text, bool):
+        raw = str(text)
+    else:
+        raw = str(text).strip()
+    if raw == "":
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError("ICP final overlap must be a whole number from "
+                         f"{ICP_OVERLAP_MIN} to {ICP_OVERLAP_MAX} (percent), "
+                         "or blank.")
+    if (value != value or value in (float("inf"), float("-inf")) or value != int(value)
+            or not (ICP_OVERLAP_MIN <= value <= ICP_OVERLAP_MAX)):
+        raise ValueError("ICP final overlap must be a whole number from "
+                         f"{ICP_OVERLAP_MIN} to {ICP_OVERLAP_MAX} (percent), "
+                         "or blank.")
+    return int(value)
+
+
 def build_cleanup_command(input_ply, output_ply, sor_neighbors=6, sor_std_dev=1.0,
-                           align_to_ply=None, log_file=None, pipeline=None):
+                           align_to_ply=None, log_file=None, pipeline=None,
+                           icp_overlap=None):
     """
     If align_to_ply is given, runs ICP to register input_ply onto it after
     outlier removal (input_ply is treated as the moving cloud). This is
@@ -1114,12 +1180,21 @@ def build_cleanup_command(input_ply, output_ply, sor_neighbors=6, sor_std_dev=1.
     explicitly). start_stage() is still called immediately when pipeline
     is given, recording align_to_ply (if any) in this run's params
     either way.
+
+    icp_overlap: optional whole number from 10 to 100 (percent). It is passed
+    to CloudCompare as -OVERLAP, after -ICP. ICP then uses only that share of
+    the points (the best-matching ones) for the final fit, so the worst-matching
+    points (for example junk points) are left out. None = no -OVERLAP flag,
+    CloudCompare keeps its own default. It has no effect (and it is not
+    recorded) when align_to_ply is not given, because no ICP runs then.
     """
+    icp_overlap = parse_icp_overlap(icp_overlap)
     if pipeline is not None:
         project_manager.start_stage(pipeline, "cleanup", params={
             "sor_neighbors": sor_neighbors,
             "sor_std_dev": sor_std_dev,
             "align_to": str(align_to_ply) if align_to_ply else None,
+            "icp_overlap": icp_overlap if align_to_ply else None,
         })
 
     cmd = ["CloudCompare", "-SILENT"]
@@ -1134,6 +1209,8 @@ def build_cleanup_command(input_ply, output_ply, sor_neighbors=6, sor_std_dev=1.
     cmd += ["-SOR", str(sor_neighbors), str(sor_std_dev)]
     if align_to_ply:
         cmd += ["-ICP", "-REFERENCE_IS_FIRST"]
+        if icp_overlap is not None:
+            cmd += ["-OVERLAP", str(icp_overlap)]
     cmd += ["-C_EXPORT_FMT", "PLY", "-SAVE_CLOUDS"]
     return cmd
 
@@ -1308,7 +1385,9 @@ def build_diff_command(baseline_ply, comparison_ply, m3c2_params_file, log_file=
 def build_classify_command(classify_script, input_ply, output_ply, threshold=None, keep_all=False,
                             cluster=True, cluster_method="dbscan", cluster_eps=0.05,
                             cluster_min_samples=4, min_cluster_size=4, use_uncertainty=False,
-                            pipeline=None):
+                            pipeline=None, find_holes=False, hole_min_points=100,
+                            hole_min_width=0.05, projection_radius=0.0,
+                            interior_point=None, hole_value=0.10):
     """
     Delegates to m3c2_classify.py, which drops (or flags) points below the
     given distance threshold so the change-highlight cloud fed into
@@ -1342,13 +1421,29 @@ def build_classify_command(classify_script, input_ply, output_ply, threshold=Non
     function that reads it back after the subprocess finishes, mirroring
     resolve_segment_output()'s manifest-absorption pattern (Section 3.3).
 
+    find_holes: also find holes (points where the M3C2 distance has no value,
+    because the new scan has no points there) and the direction of change
+    (added or removed) - m3c2_classify.py's --find-holes. Needs clustering.
+    Adds the output fields change_inward and change_type, and a "type"
+    ("added", "removed" or "hole") to every cluster in the .clusters.json.
+    The rest of the hole values (all in METRES): hole_min_points (a count),
+    hole_min_width (the shortest side a hole may have), projection_radius
+    (half of the M3C2 Search scale, for the corrected hole size; 0 = no
+    correction), interior_point ((x, y, z) of a point inside the room, or
+    None for the centre of all points) and hole_value (the value that
+    change_inward shows for a hole - display only).
+
     pipeline: optional project_manager.PipelineHandle for a DIFF pipeline.
     input_ply is always used exactly as given (see build_slam_command()'s
     docstring for the full explanation) - only start_stage() tracking
-    happens here now.
+    happens here now. (It is the last positional parameter; the find_holes
+    values follow it so that no existing call changes.)
     """
     if threshold is None and not use_uncertainty:
         raise ValueError("threshold is required unless use_uncertainty=True.")
+    if find_holes and not cluster:
+        raise ValueError("Find holes needs clustering. Turn clustering on, or turn "
+                         "Find holes off.")
 
     if pipeline is not None:
         project_manager.start_stage(pipeline, "classify", params={
@@ -1360,6 +1455,12 @@ def build_classify_command(classify_script, input_ply, output_ply, threshold=Non
             "cluster_eps": cluster_eps if (cluster and cluster_method == "dbscan") else None,
             "cluster_min_samples": cluster_min_samples if cluster else None,
             "min_cluster_size": min_cluster_size if cluster else None,
+            "find_holes": bool(find_holes),
+            "hole_min_points": hole_min_points if find_holes else None,
+            "hole_min_width": hole_min_width if find_holes else None,
+            "projection_radius": projection_radius if find_holes else None,
+            "interior_point": list(interior_point) if (find_holes and interior_point) else None,
+            "hole_value": hole_value if find_holes else None,
         })
 
     cmd = [sys.executable, str(classify_script),
@@ -1379,6 +1480,15 @@ def build_classify_command(classify_script, input_ply, output_ply, threshold=Non
             cmd += ["--cluster-eps", str(cluster_eps)]
     else:
         cmd.append("--no-cluster")
+    if find_holes:
+        cmd += ["--find-holes",
+                "--min-hole-points", str(int(hole_min_points)),
+                "--min-hole-width", str(hole_min_width),
+                "--hole-value", str(hole_value)]
+        if projection_radius:
+            cmd += ["--projection-radius", str(projection_radius)]
+        if interior_point:
+            cmd += ["--interior-point"] + [str(float(v)) for v in interior_point]
     return cmd
 
 
@@ -1401,6 +1511,11 @@ def resolve_classify_output(output_ply):
     Returns {} (never raises) if no sidecar exists - clustering was
     disabled with cluster=False/--no-cluster, or the run failed before
     reaching Step D.
+
+    With Find holes, each entry of "clusters" also has a "type" ("added",
+    "removed", "changed", "hole" or "unmatched"), and a hole or unmatched
+    entry has its size (width, height, thickness, area) instead of the M3C2
+    magnitudes.
     """
     summary_path = classify_clusters_path(output_ply)
     if not summary_path.exists():
@@ -1411,7 +1526,20 @@ def resolve_classify_output(output_ply):
         return {}
 
     extra_fields = {}
-    for key in ("n_flagged", "n_confirmed", "n_noise", "use_uncertainty", "uncertainty_field"):
+    for key in ("n_flagged", "n_confirmed", "n_noise", "use_uncertainty", "uncertainty_field",
+                # Only present when the run used Find holes (m3c2_classify.py
+                # --find-holes). n_confirmed / n_noise / n_flagged keep their
+                # meaning (measured change only); the points of holes are
+                # counted in n_hole_points.
+                "find_holes", "direction_found", "n_added_points", "n_removed_points",
+                "n_holes", "n_hole_points", "n_missing", "projection_radius",
+                # Sites of the type "unmatched": patches with no partner in the
+                # other scan (a moved or absent object).
+                "find_unmatched", "n_unmatched", "n_unmatched_points",
+                # How the inside of the room was found (m3c2_classify.py
+                # --find-holes): "probe", "centroid" or "interior-point".
+                "interior_method", "n_orient_fallback",
+                "orient_disagree_with_centroid"):
         if key in summary:
             extra_fields[key] = summary[key]
     clusters = summary.get("clusters")
@@ -1420,10 +1548,401 @@ def resolve_classify_output(output_ply):
     return extra_fields
 
 
+def read_ply_vertex_properties(ply_path):
+    """Names of the properties of the 'vertex' element of a PLY file, read
+    from the header only (the file is not loaded). Returns a list, or None if
+    the file cannot be read or is not a PLY file. Never raises."""
+    try:
+        with open(ply_path, "rb") as handle:
+            head = handle.read(65536)
+    except (OSError, TypeError, ValueError):
+        return None
+    if not head.startswith(b"ply"):
+        return None
+    end = head.find(b"end_header")
+    if end < 0:
+        return None
+    names, in_vertex = [], False
+    for line in head[:end].decode("ascii", errors="replace").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "element":
+            in_vertex = len(parts) > 1 and parts[1] == "vertex"
+        elif parts[0] == "property" and in_vertex and len(parts) >= 3:
+            names.append(parts[-1])
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Stage 7: Surface (Open3D - reconstructs a mesh from a point cloud). The
 # Blender method has its own builder below: build_blender_surface_command().
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Registration estimate from the M3C2 distances (Stage 5)
+# ---------------------------------------------------------------------------
+
+M3C2_DISTANCE_FIELD = "scalar_M3C2_distance"
+
+
+def robust_m3c2_spread(ply_path, field=M3C2_DISTANCE_FIELD):
+    """Estimate the registration error from a Stage 5 (M3C2) result.
+
+    The ICP RMS of Stage 3 is the nearest-point distance (point to point) over
+    sampled points. M3C2 measures the distance along the surface normal. The
+    two numbers can be very different. In a real test the ICP RMS was 5.35 cm
+    and the spread of the M3C2 distances was 0.31 cm. The spread of the M3C2
+    distances on the surfaces that did not change is the number that the M3C2
+    significance test needs. The median and the median absolute deviation
+    (MAD) ignore a small share of damaged points.
+
+    Returns None when the file cannot be read, has no `field`, or has fewer
+    than 100 valid distances. Otherwise a dict (all distances in metres):
+      n_total, n_valid, n_nan   point counts (NaN = no partner, a hole)
+      median                    systematic offset between the two scans
+      robust_sigma              1.4826 x MAD about the median: the estimate
+      median_abs                median of |distance|
+      p95_abs                   95th percentile of |distance|
+      tail_threshold, tail_share  share of the valid distances that are more
+                                than max(5 x robust_sigma, 1 cm) from the median
+    Never raises. Needs numpy and plyfile (None when they are not installed).
+    The value also holds some surface roughness, so it is an upper estimate
+    of the pure registration error.
+    """
+    try:
+        import numpy as np
+        from plyfile import PlyData
+    except ImportError:
+        return None
+    try:
+        vertex = PlyData.read(str(ply_path))["vertex"]
+        if field not in vertex.data.dtype.names:
+            return None
+        d = np.asarray(vertex[field], dtype=np.float64)
+    except Exception:
+        return None
+    return _spread_statistics(d)
+
+
+def _spread_statistics(d):
+    """Statistics of an array of M3C2-style distances (NaN = no distance).
+    Same numbers for the Stage 5 report and for the quick check.
+    Returns None when there are fewer than 100 valid values."""
+    import numpy as np
+    valid = d[np.isfinite(d)]
+    if valid.size < 100:
+        return None
+    med = float(np.median(valid))
+    sigma = float(1.4826 * np.median(np.abs(valid - med)))
+    tail_threshold = float(max(5.0 * sigma, 0.01))
+    return {
+        "n_total": int(d.size),
+        "n_valid": int(valid.size),
+        "n_nan": int(d.size - valid.size),
+        "median": med,
+        "robust_sigma": sigma,
+        "median_abs": float(np.median(np.abs(valid))),
+        "p95_abs": float(np.percentile(np.abs(valid), 95)),
+        "p99_abs": float(np.percentile(np.abs(valid), 99)),
+        "tail_threshold": tail_threshold,
+        "tail_share": float(np.mean(np.abs(valid - med) > tail_threshold)),
+    }
+
+
+# Stage 6 threshold check. A fixed threshold of 2 to 3 times the spread assumes
+# that the distances follow a bell curve. A real scan can have a heavy tail: the
+# middle is quiet but many points are far from zero. Then the same threshold
+# flags many more points than the bell curve says.
+THRESHOLD_HEAVY_MIN_SHARE = 0.05      # more than 5 % flagged ...
+THRESHOLD_HEAVY_RATIO = 5.0           # ... and more than 5 times the bell-curve share
+
+
+def m3c2_threshold_check(ply_path, threshold, field=M3C2_DISTANCE_FIELD):
+    """Compare a Stage 6 distance threshold (metres) with the distances of a
+    Stage 5 (M3C2) result file.
+
+    Returns None when the file cannot be read, has no `field`, or has fewer than
+    100 valid distances. Otherwise a dict (distances in metres):
+      stats                the dict of robust_m3c2_spread()
+      threshold            the threshold that was checked
+      share_flagged        share of the valid distances with |distance| >= threshold
+      share_bell_curve     the share that a bell curve with the same robust spread
+                           would give (two-sided, centred on zero)
+      heavy_tail           True when share_flagged is more than 5 % and more than
+                           5 times share_bell_curve
+      percentile_threshold the 95th percentile of |distance|. A threshold with this
+                           value flags about 5 % of the points.
+    Never raises. Needs numpy and plyfile (None when they are not installed)."""
+    try:
+        import math
+        import numpy as np
+        from plyfile import PlyData
+    except ImportError:
+        return None
+    try:
+        vertex = PlyData.read(str(ply_path))["vertex"]
+        if field not in vertex.data.dtype.names:
+            return None
+        d = np.asarray(vertex[field], dtype=np.float64)
+    except Exception:
+        return None
+    stats = _spread_statistics(d)
+    if stats is None:
+        return None
+    valid = np.abs(d[np.isfinite(d)])
+    share = float(np.mean(valid >= threshold))
+    sigma = stats["robust_sigma"]
+    bell = math.erfc(threshold / (sigma * math.sqrt(2.0))) if sigma > 0 else 0.0
+    heavy = share > THRESHOLD_HEAVY_MIN_SHARE and share > THRESHOLD_HEAVY_RATIO * bell
+    return {
+        "stats": stats,
+        "threshold": float(threshold),
+        "share_flagged": share,
+        "share_bell_curve": float(bell),
+        "heavy_tail": bool(heavy),
+        "percentile_threshold": stats["p95_abs"],
+    }
+
+
+def threshold_check_text(check):
+    """Text for the Stage 6 threshold check (a multi-line string, in cm)."""
+    s = check["stats"]
+    lines = [
+        f"Threshold: {check['threshold'] * 100:.2f} cm. Spread of the distances "
+        f"(robust): {s['robust_sigma'] * 100:.2f} cm.",
+        f"This threshold flags {check['share_flagged'] * 100:.1f} % of the points. "
+        f"A bell curve with this spread flags {check['share_bell_curve'] * 100:.2f} %.",
+        f"Distances: 95 % are smaller than {s['p95_abs'] * 100:.2f} cm and 99 % are "
+        f"smaller than {s['p99_abs'] * 100:.2f} cm.",
+    ]
+    if check["heavy_tail"]:
+        lines.append(
+            "WARNING: the distances have a heavy tail. Many points are far from zero, "
+            "so a threshold of 2 to 3 times the spread flags too many points. These "
+            "points can join into very large damage sites. They can be noise, drift or "
+            "real change. A threshold from the 95th percentile "
+            f"({check['percentile_threshold'] * 100:.2f} cm) flags about 5 % of the "
+            "points. Use it as a start and look at the result in CloudCompare.")
+    else:
+        lines.append("The tail is not heavy. The threshold is a reasonable start.")
+    return "\n".join(lines)
+
+
+QUICK_REGISTRATION_CORE_POINTS = 10000
+
+
+def quick_registration_estimate(baseline_ply, comparison_ply, normal_scale,
+                                search_scale, search_depth,
+                                max_core_points=QUICK_REGISTRATION_CORE_POINTS,
+                                seed=0):
+    """Estimate the registration error BEFORE Stage 5 runs, without CloudCompare.
+
+    It uses the same idea as M3C2 on a random sample of the baseline points
+    (the core points):
+      1. The normal at a core point: the plane through the baseline points
+         inside a sphere of diameter `normal_scale`. The normal points to the
+         centre of the baseline.
+      2. A cylinder around the normal: diameter `search_scale`, total length
+         `search_depth`. The distance is the mean position of the comparison
+         points in the cylinder minus the mean position of the baseline
+         points in the cylinder, both along the normal. A core point with no
+         points of one cloud in the cylinder has no distance (NaN).
+      3. The statistics are the same as for a Stage 5 result
+         (_spread_statistics), so the numbers can be compared.
+
+    This is an ESTIMATE. It does not use the exact CloudCompare code (for
+    example, the length of the cylinder and the handling of the normals can
+    differ). Use it to choose the Registration RMS before the run, and use
+    the REGISTRATION CHECK of the Stage 5 report to confirm the value.
+
+    All lengths are in metres. Returns (estimate, message). On success
+    `estimate` is the dict of robust_m3c2_spread() with the extra keys
+    "n_core" and "method" ("quick") and `message` is "". When the estimate
+    is not possible, `estimate` is None and `message` says why. Never raises.
+    """
+    try:
+        import numpy as np
+        from plyfile import PlyData
+        from scipy.spatial import cKDTree
+    except ImportError as e:
+        return None, (f"The Python package '{e.name}' is not installed. Install numpy, "
+                      "scipy and plyfile (see requirements.txt).")
+    try:
+        normal_scale = float(normal_scale)
+        search_scale = float(search_scale)
+        search_depth = float(search_depth)
+    except (TypeError, ValueError):
+        return None, "The normal scale, search scale and search depth must be numbers."
+    if min(normal_scale, search_scale, search_depth) <= 0:
+        return None, "The normal scale, search scale and search depth must be above 0."
+
+    def read_xyz(path):
+        vertex = PlyData.read(str(path))["vertex"]
+        return np.column_stack([np.asarray(vertex[axis], dtype=np.float64)
+                                for axis in ("x", "y", "z")])
+
+    try:
+        base = read_xyz(baseline_ply)
+    except Exception as e:
+        return None, f"The baseline file cannot be read: {e}"
+    try:
+        comp = read_xyz(comparison_ply)
+    except Exception as e:
+        return None, f"The comparison file cannot be read: {e}"
+    if len(base) < 100 or len(comp) < 100:
+        return None, "A file has fewer than 100 points."
+
+    rng = np.random.default_rng(seed)
+    n_core = int(min(max_core_points, len(base)))
+    core = base[rng.choice(len(base), n_core, replace=False)]
+    tree_base, tree_comp = cKDTree(base), cKDTree(comp)
+    centre = base.mean(axis=0)
+
+    radius_cyl = search_scale / 2.0
+    half_len = search_depth / 2.0
+    radius_ball = float(np.hypot(radius_cyl, half_len))
+    normal_neighbours = tree_base.query_ball_point(core, normal_scale / 2.0)
+    base_neighbours = tree_base.query_ball_point(core, radius_ball)
+    comp_neighbours = tree_comp.query_ball_point(core, radius_ball)
+
+    def along_normal(points, origin, normal):
+        """Positions along the normal of the points that are inside the cylinder."""
+        v = points - origin
+        t = v @ normal
+        inside = (np.abs(t) <= half_len) & ((v * v).sum(axis=1) - t * t <= radius_cyl ** 2)
+        return t[inside]
+
+    distances = np.full(n_core, np.nan)
+    for i in range(n_core):
+        idx = normal_neighbours[i]
+        if len(idx) < 4:
+            continue
+        pts = base[idx]
+        local = pts - pts.mean(axis=0)
+        try:
+            _, vectors = np.linalg.eigh(local.T @ local)
+        except np.linalg.LinAlgError:
+            continue
+        normal = vectors[:, 0]
+        if normal @ (centre - core[i]) < 0:
+            normal = -normal
+        t_base = along_normal(base[base_neighbours[i]], core[i], normal) \
+            if base_neighbours[i] else ()
+        t_comp = along_normal(comp[comp_neighbours[i]], core[i], normal) \
+            if comp_neighbours[i] else ()
+        if len(t_base) == 0 or len(t_comp) == 0:
+            continue
+        distances[i] = float(np.mean(t_comp) - np.mean(t_base))
+
+    estimate = _spread_statistics(distances)
+    if estimate is None:
+        return None, ("Fewer than 100 core points have a distance. The scans may not "
+                      "overlap, or the scales are too small for the point spacing. Check "
+                      "the Normal scale (use 'Check Point Spacing') and the alignment.")
+    estimate["n_core"] = n_core
+    estimate["method"] = "quick"
+    return estimate, ""
+
+
+def find_m3c2_result(candidates, field=M3C2_DISTANCE_FIELD):
+    """First path in `candidates` whose PLY header has `field`, else None.
+    Reads only the headers. Never raises."""
+    for path in candidates or []:
+        props = read_ply_vertex_properties(path)
+        if props and field in props:
+            return Path(path)
+    return None
+
+
+def registration_status(entered_rms, estimate):
+    """Compare the entered Registration RMS (metres, or None) with the estimate
+    of robust_m3c2_spread() or quick_registration_estimate().
+    Returns "none" (nothing entered), "too_high" (the RMS is more than 1.5 times
+    the spread), "too_low" (less than 0.67 times the spread) or "ok"."""
+    if entered_rms is None:
+        return "none"
+    sigma = estimate["robust_sigma"]
+    ratio = entered_rms / sigma if sigma > 0 else float("inf")
+    if ratio > 1.5:
+        return "too_high"
+    if ratio < 0.67:
+        return "too_low"
+    return "ok"
+
+
+def registration_headline(entered_rms, estimate):
+    """One short line (capital letters) for the top of the Stage 5 report."""
+    sigma_cm = estimate["robust_sigma"] * 100
+    status = registration_status(entered_rms, estimate)
+    if status == "none":
+        return f"ENTER {sigma_cm:.2f} cm AS THE REGISTRATION RMS"
+    if status == "too_high":
+        return (f"CHANGE THE REGISTRATION RMS FROM {entered_rms * 100:.2f} cm "
+                f"TO {sigma_cm:.2f} cm AND RUN AGAIN")
+    if status == "too_low":
+        return (f"CHECK THE ALIGNMENT: THE SPREAD ({sigma_cm:.2f} cm) IS LARGER THAN "
+                f"THE REGISTRATION RMS ({entered_rms * 100:.2f} cm)")
+    return f"OK: THE REGISTRATION RMS AGREES WITH THE SPREAD ({sigma_cm:.2f} cm)"
+
+
+def registration_advice(entered_rms, estimate):
+    """Text for the Stage 5 report: compare the entered registration RMS (in
+    metres, or None) with the estimate from robust_m3c2_spread().
+    Returns a short multi-line string."""
+    sigma = estimate["robust_sigma"]
+    lines = [
+        f"Distances on {estimate['n_valid']} of {estimate['n_total']} points "
+        f"({estimate['n_nan']} points have no distance).",
+        f"Offset between the scans (median distance): {estimate['median'] * 100:+.2f} cm.",
+        f"Spread of the distances (robust, 1.4826 x MAD): {sigma * 100:.2f} cm.",
+        f"95 % of the distances are smaller than {estimate['p95_abs'] * 100:.2f} cm "
+        "(plus or minus).",
+    ]
+    if entered_rms is None:
+        lines.append(
+            f"No Registration RMS was entered. You can enter {sigma * 100:.2f} cm "
+            "as the Registration RMS.")
+    else:
+        status = registration_status(entered_rms, estimate)
+        if status == "too_high":
+            lines.append(
+                f"The Registration RMS ({entered_rms * 100:.2f} cm) is much larger than "
+                "this spread. Most of the surface agrees better than the RMS says. "
+                "ICP measures the nearest-point distance. M3C2 measures the distance "
+                "along the surface normal. The two values can be very different. "
+                f"Try {sigma * 100:.2f} cm as the Registration RMS, push 'Generate "
+                "Params File...' and run Stage 5 again.")
+        elif status == "too_low":
+            lines.append(
+                f"The distances spread more than the Registration RMS "
+                f"({entered_rms * 100:.2f} cm) says. The alignment can be poor, or the "
+                "surfaces are rough. Check the alignment in CloudCompare before you "
+                f"trust small changes. Compare with {sigma * 100:.2f} cm.")
+        else:
+            lines.append(
+                f"The Registration RMS ({entered_rms * 100:.2f} cm) agrees with the "
+                "spread of the distances.")
+    if estimate.get("tail_share", 0.0) > 0.02:
+        lines.append(
+            f"{estimate['tail_share'] * 100:.1f} % of the distances are more than "
+            f"{estimate['tail_threshold'] * 100:.1f} cm from the median. The spread "
+            "above does not describe these points. They can be noise (for example in "
+            "corners or on clutter) or real change. Look at them in CloudCompare "
+            "before you trust the flagged points.")
+        if "p99_abs" in estimate:
+            lines.append(
+                f"For Stage 6: 95 % of the distances are smaller than "
+                f"{estimate['p95_abs'] * 100:.2f} cm and 99 % are smaller than "
+                f"{estimate['p99_abs'] * 100:.2f} cm. A Stage 6 threshold of 2 to 3 "
+                f"times the spread ({sigma * 200:.2f} to {sigma * 300:.2f} cm) can flag "
+                "many more points than you expect. Use 'Check Threshold Against the "
+                "Diff File' in Stage 6 before you run it.")
+    lines.append(
+        "The spread includes some surface roughness, so it is an upper estimate of "
+        "the registration error.")
+    return "\n".join(lines)
+
 
 def build_surface_command(surface_script, input_ply, output_ply, method="poisson",
                            depth=None, density_trim_percentile=None, ball_radii=None,

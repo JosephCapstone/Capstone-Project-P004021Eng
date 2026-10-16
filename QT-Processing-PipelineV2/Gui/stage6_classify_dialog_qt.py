@@ -28,12 +28,25 @@ build_classify_command()'s own validation
 here too, before a subprocess ever spawns, same as every other
 required-field check in this file).
 
+Also wired: "Find holes" - a checkbox for m3c2_classify.py's --find-holes.
+M3C2 gives no distance where the new scan has no points (a hole that opens to
+empty space), and Stage 6 used to ignore those points. With the box on, Stage
+6 groups them, measures each group and keeps the real holes as damage sites
+of the type "hole". It also finds the direction of each change (added or
+removed): every damage site gets a "type", and the output file gets the
+fields change_inward and change_type. The report lists the sites by type.
+"Projection radius" is pre-filled from the M3C2 params file that this diff's
+Stage 5 run used (half of its SearchScale), see _default_projection_radius().
+The box is off by default, so a run without it is the same as before.
+
 Run standalone:
     pip install PySide6
     python stage6_classify_dialog_qt.py
 """
 import sys
+from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox
 
 from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm
@@ -47,6 +60,127 @@ try:
     import pipeline_core as core
 except ImportError:
     core = None
+
+
+def _default_projection_radius(pipeline):
+    """Half of the SearchScale in the M3C2 params file that this diff's
+    Stage 5 run used, in METRES as text - or "" when nothing is known
+    (manual mode, Stage 5 not run, no params file, no SearchScale line).
+    M3C2 finds valid values up to this distance inside a hole, so the
+    measured hole is smaller than the real one by this much on each side;
+    Find holes uses the value to report the corrected size. Never raises."""
+    if pipeline is None or getattr(pipeline, "kind", None) != "diff":
+        return ""
+    if core is None or pm is None:
+        return ""
+    try:
+        diff_stage = pipeline.entry.get("stages", {}).get("diff", {}) or {}
+        params = diff_stage.get("params", {}) or {}
+        params_file = params.get("m3c2_params_file") or diff_stage.get("m3c2_params_file")
+        if not params_file:
+            return ""
+        path = Path(params_file)
+        if not path.is_absolute():
+            path = pm.get_absolute_path(pipeline.project, params_file)
+        search_scale = core.read_m3c2_search_scale(path)
+    except Exception:
+        return ""
+    if not search_scale or search_scale <= 0:
+        return ""
+    return f"{search_scale / 2.0:g}"
+
+
+def _parse_interior_point(text):
+    """'1.2, 0.5, 0.8' (metres) -> (1.2, 0.5, 0.8). Blank -> None. Raises
+    ValueError with a plain message for anything else."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    parts = [part for part in text.replace(";", ",").replace(" ", ",").split(",") if part]
+    try:
+        values = tuple(float(part) for part in parts)
+    except ValueError:
+        values = ()
+    if len(values) != 3:
+        raise ValueError("'Inside point' must be three numbers in metres, for example "
+                         "1.2, 0.5, 0.8 - or leave it blank.")
+    return values
+
+
+def _site_line(c):
+    """One report line for one damage site (a cluster of clusters.json).
+    A site from Find holes has a type. A hole has a size, not an M3C2
+    magnitude."""
+    centroid = ", ".join(f"{v:.3f}" for v in c.get("centroid", []))
+    kind = c.get("type")
+    label = f"site {c.get('cluster_id')}" + (f" [{kind}]" if kind else "")
+    line = (f"  {label}: {c.get('point_count')} points, centroid=({centroid}) m, ")
+    if kind == "unmatched":
+        line += (f"size {fmt_cm(round(c.get('width', 0), 4))} x "
+                 f"{fmt_cm(round(c.get('height', 0), 4))}, "
+                 f"fill {c.get('fill_fraction', 0):.2f} (no partner in the other scan)")
+        return line + "\n"
+    if kind == "hole":
+        line += (f"size {fmt_cm(round(c.get('width', 0), 4))} x "
+                 f"{fmt_cm(round(c.get('height', 0), 4))}, "
+                 f"area {c.get('area', 0):.3f} m2")
+        if c.get("corrected_area") is not None:
+            line += (f" (corrected for the projection radius: "
+                     f"{fmt_cm(round(c.get('corrected_width', 0), 4))} x "
+                     f"{fmt_cm(round(c.get('corrected_height', 0), 4))}, "
+                     f"area {c['corrected_area']:.3f} m2)")
+        return line + "\n"
+    return line + f"max|d|={fmt_cm(round(c.get('max_magnitude', 0), 4))}\n"
+
+
+def _inside_text(extra_fields):
+    """One report line: how Stage 6 found the inside of the room."""
+    method = extra_fields.get("interior_method")
+    fallback = extra_fields.get("n_orient_fallback") or 0
+    if method == "probe":
+        line = "Inside of the room: found automatically"
+        if fallback:
+            line += (f" (no clear answer for {fallback} points: they use the centre of all "
+                     f"points)")
+        return line + "\n"
+    if method == "interior-point":
+        return "Inside of the room: the point that you entered\n"
+    if method == "centroid":
+        return ("Inside of the room: the centre of all points. The scan has no clear surface "
+                "to look at. If the compartment is not a simple box, enter an 'Inside "
+                "point'.\n")
+    return ""
+
+
+def _holes_summary_text(extra_fields, clusters):
+    """The Find holes lines of the report: how many sites of each type."""
+    counts = {"added": 0, "removed": 0, "hole": 0, "changed": 0, "unmatched": 0}
+    for c in clusters:
+        if c.get("type") in counts:
+            counts[c["type"]] += 1
+    text = ""
+    if not extra_fields.get("direction_found", True):
+        text += ("The file has no point normals (nx, ny, nz), so the direction of change "
+                 "could not be found. The sites of measured change have the type 'changed'.\n")
+    else:
+        text += (f"Added: {counts['added']} site(s), "
+                 f"{extra_fields.get('n_added_points', '?')} points\n"
+                 f"Removed: {counts['removed']} site(s), "
+                 f"{extra_fields.get('n_removed_points', '?')} points\n")
+        text += _inside_text(extra_fields)
+    text += (f"Holes: {counts['hole']} ({extra_fields.get('n_hole_points', '?')} points), "
+             f"from {extra_fields.get('n_missing', '?')} points without an M3C2 distance\n")
+    if extra_fields.get("find_unmatched") or counts["unmatched"]:
+        text += (f"Unmatched (moved or absent objects): {counts['unmatched']} site(s), "
+                 f"{extra_fields.get('n_unmatched_points', '?')} points\n")
+        if counts["unmatched"]:
+            text += ("An unmatched site is a patch with no partner in the other scan, but "
+                     "with valid points mixed in. A moved object looks like this. It is not "
+                     "a hole. Look at it in CloudCompare (change_type 4).\n")
+    if counts["hole"] and not extra_fields.get("projection_radius"):
+        text += ("The hole sizes are the measured sizes. The real holes are larger. Enter "
+                 "the 'Projection radius' to get the corrected size.\n")
+    return text
 
 
 class Stage6ClassifyFieldsMixin:
@@ -69,6 +203,10 @@ class Stage6ClassifyFieldsMixin:
         self.add_file_field(
             "comparison_for_rms", "Comparison .ply (from Stage 3, for RMS lookup):",
             [("PLY files", "*.ply")])
+        self.add_project_picker_button(
+            "comparison_for_rms",
+            lambda: pm.list_side_candidates(
+                self.pipeline.project, self.pipeline.entry["comparison"]))
         self.add_hint(
             "Optional - only needed for the 'Load RMS' button below. This should be the "
             "Stage 3 (Cleanup) file specifically, not a Stage 4 (Segment) output or the "
@@ -92,11 +230,26 @@ class Stage6ClassifyFieldsMixin:
             "low = false positives from scan noise; too high = real damage gets filtered "
             "out. A reasonable starting point is roughly 2-3x the registration RMS from "
             "Stage 3's ICP log - use 'Load RMS' below to compute and fill this in "
-            "automatically rather than guessing.")
+            "automatically rather than guessing. Then use 'Check Threshold Against the "
+            "Diff File': the 2-3x rule is wrong when the distances have a heavy tail.")
 
         load_rms_btn = QPushButton("Load RMS & Suggest Threshold")
         load_rms_btn.clicked.connect(self._load_rms_and_suggest)
         self.form.addWidget(load_rms_btn)
+
+        check_threshold_btn = QPushButton("Check Threshold Against the Diff File...")
+        check_threshold_btn.setToolTip(
+            "Reads the M3C2 distances of the diff file. Shows how many points the "
+            "Distance threshold above flags, and how many a bell curve would flag. "
+            "Warns when the distances have a heavy tail.")
+        check_threshold_btn.clicked.connect(self._check_threshold_against_diff)
+        self.form.addWidget(check_threshold_btn)
+        self.add_hint(
+            "'Check Threshold Against the Diff File' reads the distances of the file in "
+            "'M3C2 diff result .ply' (5 to 30 seconds). A threshold of 2-3x the spread "
+            "is correct only when the distances follow a bell curve. With a heavy tail "
+            "it flags too many points, and they join into very large sites. The check "
+            "warns you and suggests a threshold from the 95th percentile.")
 
         self.add_checkbox(
             "use_uncertainty",
@@ -165,6 +318,52 @@ class Stage6ClassifyFieldsMixin:
             "total to count as a real site.' Clusters smaller than this are folded into "
             "the rejected/noise count, same as any other isolated point.")
 
+        self.add_checkbox("find_holes", "Also find holes, and show added and removed material",
+                          default=True)
+        self.add_hint(
+            "M3C2 gives no distance where the new scan has no points at all (for example a "
+            "hole that opens to empty space). Stage 6 normally ignores these points. When "
+            "this box is on, Stage 6 groups them, measures each group, and keeps the real "
+            "holes as damage sites of the type 'hole'. It also finds the direction of each "
+            "change: 'added' (the surface moved into the room) or 'removed' (the surface "
+            "moved away from the room). Each damage site gets a type. The output file gets "
+            "the fields change_inward (+ added, - removed, the same on every wall) and "
+            "change_type. Clustering must be on: with clustering off, this option does "
+            "nothing. The box is on by default. With it off, Stage 6 gives the same "
+            "result as before.")
+
+        self.add_length_field(
+            "projection_radius", "Projection radius (cm, Find holes):", default_m="",
+            min_cm=0.1, max_cm=200)
+        self.register_auto_default("projection_radius", _default_projection_radius)
+        self.add_hint(
+            "Half of the Search scale in the M3C2 params file. M3C2 finds valid values up to "
+            "this distance inside a hole, so the measured hole is smaller than the real hole. "
+            "With this value the report also gives the corrected size. It is filled in from "
+            "the params file of this diff's Stage 5 run. Blank = no correction. Used only "
+            "when Find holes is on.")
+
+        self.add_text_field("min_hole_points", "Smallest hole (points, Find holes):",
+                            default="100")
+        self.add_length_field(
+            "min_hole_width", "Smallest hole width (cm, Find holes):", default_m="0.05",
+            min_cm=0.5, max_cm=200)
+        self.add_hint(
+            "A group of missing points is a hole only when it has at least this many points "
+            "and its short side is at least this wide. This removes thin strips along edges "
+            "and corners. Two more tests are always on: a ring of valid M3C2 values around "
+            "the hole (this removes shadows) and an empty inside (this removes patchy "
+            "dropout).")
+
+        self.add_text_field("interior_point",
+                            "Inside point (x, y, z in m, optional, Find holes):")
+        self.add_hint(
+            "Blank = automatic. Stage 6 looks along each surface normal: a line into the "
+            "room hits the opposite wall, and a line away from the room hits nothing. This "
+            "also works in an L-shaped compartment. Enter a point only if the report says "
+            "that the inside of the room could not be found for many points. Enter a point "
+            "inside the room, in the coordinates of the file.")
+
         self.form.addStretch(1)
 
     def _load_rms_and_suggest(self):
@@ -202,14 +401,67 @@ class Stage6ClassifyFieldsMixin:
 
         suggested_threshold = rms * multiplier
         self.fields["threshold"].set(f"{suggested_threshold:.6f}")
-        QMessageBox.information(
-            self, "Threshold suggested",
+        message = (
             f"Registration RMS: {fmt_cm(round(rms, 6))}\n"
             f"Multiplier: {multiplier}x\n"
             f"Suggested threshold: {fmt_cm(round(suggested_threshold, 6))} "
             f"(filled in above)\n\n"
             "This is a starting point, not a guarantee - check the flagged percentage "
             "after running (0% or ~100% means it needs adjusting either direction).")
+        # The diff file is the real test of the threshold: look at its distances.
+        diff_path = self.fields["input"].get().strip()
+        if diff_path and Path(diff_path).exists() and core is not None:
+            check = core.m3c2_threshold_check(diff_path, suggested_threshold)
+            if check is not None:
+                message += "\n\nCheck against the diff file:\n" + core.threshold_check_text(check)
+        QMessageBox.information(self, "Threshold suggested", message)
+
+    def _check_threshold_against_diff(self):
+        """Read the M3C2 distances of the input file and compare them with the
+        Distance threshold on the page (core.m3c2_threshold_check). Offers to
+        put the 95th-percentile threshold in the field. A synchronous call
+        with a wait cursor, same as Stage 5's 'Check Point Spacing'."""
+        diff_path = self.fields["input"].get().strip()
+        if not diff_path or not Path(diff_path).exists():
+            QMessageBox.critical(
+                self, "No diff file",
+                "Fill in a valid 'M3C2 diff result .ply' first (the Stage 5 output).")
+            return
+        try:
+            threshold = float(self.fields["threshold"].get().strip())
+        except ValueError:
+            QMessageBox.critical(
+                self, "No threshold",
+                "Fill in the Distance threshold first. The check compares it with the "
+                "distances of the diff file.")
+            return
+        if core is None:
+            QMessageBox.critical(self, "Not available",
+                                 "pipeline_core.py is not loaded, so the check cannot run.")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            check = core.m3c2_threshold_check(diff_path, threshold)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if check is None:
+            QMessageBox.warning(
+                self, "Check Threshold",
+                "No estimate. The file has no 'scalar_M3C2_distance' field, it has fewer "
+                "than 100 distances, or numpy and plyfile are not installed.")
+            return
+        text = core.threshold_check_text(check)
+        percentile = check["percentile_threshold"]
+        if check["heavy_tail"]:
+            answer = QMessageBox.question(
+                self, "Check Threshold",
+                text + f"\n\nPut {percentile * 100:.2f} cm in 'Distance threshold'?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self.fields["threshold"].set(f"{percentile:.6f}")
+        else:
+            QMessageBox.information(self, "Check Threshold", text)
 
     def _build_run(self):
         """Real Run - matches open_classify_dialog()'s build() in
@@ -248,12 +500,36 @@ class Stage6ClassifyFieldsMixin:
             raise ValueError("Cluster gap tolerance must be a number in cm; cluster density and "
                               "minimum damage site size must be whole numbers.")
 
+        find_holes = self.fields["find_holes"].get()
+        holes_need_clustering = bool(find_holes and not cluster)
+        if holes_need_clustering:
+            find_holes = False      # no clustering: nothing to find holes with
+        hole_kwargs = {}
+        if find_holes:
+            try:
+                hole_min_points = int(self.fields["min_hole_points"].get())
+            except ValueError:
+                raise ValueError("'Smallest hole (points)' must be a whole number.")
+            width_text = self.fields["min_hole_width"].get().strip()
+            radius_text = self.fields["projection_radius"].get().strip()
+            try:
+                hole_min_width = float(width_text) if width_text else 0.05
+                projection_radius = float(radius_text) if radius_text else 0.0
+            except ValueError:
+                raise ValueError("'Smallest hole width' and 'Projection radius' must be "
+                                 "numbers in cm.")
+            interior_point = _parse_interior_point(self.fields["interior_point"].get())
+            hole_kwargs = dict(find_holes=True, hole_min_points=hole_min_points,
+                               hole_min_width=hole_min_width,
+                               projection_radius=projection_radius,
+                               interior_point=interior_point)
+
         active_pipeline = self.get_active_pipeline_for_run()
         cmd = core.build_classify_command(
             script, input_ply, output, threshold, keep_all,
             cluster=cluster, cluster_method=cluster_method, cluster_eps=cluster_eps,
             cluster_min_samples=cluster_min_samples, min_cluster_size=min_cluster_size,
-            use_uncertainty=use_uncertainty, pipeline=active_pipeline)
+            use_uncertainty=use_uncertainty, pipeline=active_pipeline, **hole_kwargs)
 
         resolved_state = {}
 
@@ -273,7 +549,10 @@ class Stage6ClassifyFieldsMixin:
                 f"Threshold: {threshold_text_out}\n"
                 f"Mode: {mode_text}\n"
                 f"Clustering: {'on (' + cluster_method + ')' if cluster else 'off'}\n"
-                f"Saved to: {output}\n"
+                + ("Find holes: off (it needs clustering, and clustering is off)\n"
+                   if holes_need_clustering else
+                   f"Find holes: {'on' if find_holes else 'off'}\n")
+                + f"Saved to: {output}\n"
             )
 
             if cluster:
@@ -294,14 +573,12 @@ class Stage6ClassifyFieldsMixin:
                         f"confirmed damage sites (Step B/C): "
                         f"{extra_fields.get('n_confirmed', '?')}, "
                         f"rejected as spatial noise: {extra_fields.get('n_noise', '?')}\n"
-                        f"Damage sites found: {len(clusters)}\n"
                     )
+                    if extra_fields.get("find_holes"):
+                        summary += _holes_summary_text(extra_fields, clusters)
+                    summary += f"Damage sites found: {len(clusters)}\n"
                     for c in clusters:
-                        centroid = ", ".join(f"{v:.3f}" for v in c.get("centroid", []))
-                        summary += (
-                            f"  site {c.get('cluster_id')}: {c.get('point_count')} points, "
-                            f"centroid=({centroid}) m, "
-                            f"max|d|={fmt_cm(round(c.get('max_magnitude', 0), 4))}\n")
+                        summary += _site_line(c)
                     if not clusters:
                         summary += (
                             "No damage sites survived clustering - consider lowering the "
@@ -313,8 +590,15 @@ class Stage6ClassifyFieldsMixin:
                 "\n=== NOTE ===\n"
                 "Point counts and the flagged percentage are in the tool output "
                 "above - check that a sensible fraction of points got flagged, "
-                "not 0% (threshold too high) or nearly 100% (threshold too low).\n\n"
-                "=== NEXT STEPS ===\n"
+                "not 0% (threshold too high) or nearly 100% (threshold too low).\n"
+                + ("" if find_holes else
+                   ("Find holes was ticked, but clustering is off, so this run did not "
+                    "look for holes. Turn clustering on to find them.\n"
+                    if holes_need_clustering else
+                    "Find holes was off. Holes that open to empty space have no M3C2 "
+                    "distance, so this run did not look at them. Tick 'Also find holes' "
+                    "to include them.\n"))
+                + "\n=== NEXT STEPS ===\n"
                 + ("Open in CloudCompare to see which points got flagged before "
                    "deciding on a final threshold. Or use this file as the input to "
                    "Stage 7 (Surface) for a full surface: Stage 8 then shows only the "
@@ -323,6 +607,11 @@ class Stage6ClassifyFieldsMixin:
                    "Use this file as the input to Stage 7 (Surface), or directly as "
                    "the --change input to Stage 8 (Export) if reconstruction isn't "
                    "needed.\n")
+                + ("In Stage 7, leave 'change_inward' ticked in the 'Carry fields' list "
+                   "(it is ticked by default). Stage 8 then colours the mesh by "
+                   "change_inward: red where material was added and blue where material "
+                   "was removed (and for a hole), on every wall.\n"
+                   if find_holes else "")
             )
             return summary
 

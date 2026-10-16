@@ -54,6 +54,7 @@ above - none of them add or change a stored field.
 """
 
 import json
+import re
 import os
 import shutil
 from datetime import datetime, timezone
@@ -876,6 +877,13 @@ def _scan_stage_folder(handle, stage_name, include_envelope_filtered=False):
     (PROJECT_INPUT_PICKER_PLAN.md Section 3: nothing gets pre-selected
     from this anymore), not necessarily the highest sequence number.
 
+    A .ply file in the folder that does not have the standard numbered name
+    (for example a file that was renamed by hand) is listed after the
+    numbered files, newest first, with "sequence": None and a note. A
+    CloudCompare extra copy (the output name plus a time stamp or "M3C2")
+    is not listed. This applies to every stage except segment, where each
+    run is a numbered sub-folder.
+
     include_envelope_filtered (segment only, update 6): also list each
     pass's <name>_envelope_filtered.ply (when it exists) directly above
     that pass's <name>_classified.ply, with the note "outside-room points
@@ -938,21 +946,53 @@ def _scan_stage_folder(handle, stage_name, include_envelope_filtered=False):
         return results
 
     results = []
+    others = []
     for f in sorted(folder.iterdir()):
-        if not f.is_file() or not f.name.startswith(prefix):
+        if not f.is_file():
             continue
-        stem_after_prefix = f.stem[len(prefix):]
-        if not stem_after_prefix.isdigit():
-            continue
+        stem_after_prefix = f.stem[len(prefix):] if f.name.startswith(prefix) else ""
         rel_path = f"{rel_folder}/{folder_name}/{f.name}"
-        results.append({
-            "path": rel_path,
-            "sequence": int(stem_after_prefix),
-            "is_current": rel_path == current_output,
-        })
+        if stem_after_prefix.isdigit():
+            results.append({
+                "path": rel_path,
+                "sequence": int(stem_after_prefix),
+                "is_current": rel_path == current_output,
+            })
+        elif _is_hand_named_ply(f, prefix):
+            others.append((f.stat().st_mtime, {
+                "path": rel_path,
+                "sequence": None,
+                "is_current": rel_path == current_output,
+                "note": "other file (renamed or added by hand)",
+            }))
 
     results.sort(key=lambda r: r["sequence"], reverse=True)
+    # Update 13: a .ply file that was renamed by hand (or put in the folder by
+    # hand) no longer matches <compartment>_<stage>_<number>.ply. It used to
+    # disappear from every "Choose from project..." list. It is listed now,
+    # after the numbered files, newest first.
+    others.sort(key=lambda item: item[0], reverse=True)
+    results.extend(entry for _, entry in others)
     return results
+
+
+# CloudCompare saves extra copies of the clouds that it loaded next to the real
+# output. Their names are the output name plus a time stamp or "M3C2". They are
+# not outputs, so the picker does not offer them.
+_CLOUDCOMPARE_EXTRA = re.compile(r"(M3C2|\d{4}[-_]\d{2}[-_]\d{2})", re.IGNORECASE)
+
+
+def _is_hand_named_ply(path, prefix):
+    """True for a .ply file in a stage folder that does not have the standard
+    numbered name and is not a CloudCompare extra copy."""
+    if path.suffix.lower() != ".ply":
+        return False
+    if path.name.startswith(prefix):
+        rest = path.stem[len(prefix):]
+        digits = len(rest) - len(rest.lstrip("0123456789"))
+        if digits and _CLOUDCOMPARE_EXTRA.search(rest[digits:]):
+            return False
+    return True
 
 
 def list_stage_outputs(handle, stage_name):
@@ -1235,3 +1275,17 @@ def promote_baseline(project, stage_name):
     baseline["promoted_stage"] = stage_name
     baseline["promoted_timestamp"] = _now_iso()
     save_project(project)
+
+if __name__ == "__main__":
+    print(__doc__)
+    print(
+        "This file is a library module - it's meant to be imported by other "
+        "scripts (test_project_manager.py, and pipeline_core.py / "
+        "pipeline_applet.py), not run directly. Running it this way defines "
+        "everything above but doesn't DO anything, which is why a double-click "
+        "just opens and immediately closes a console window - nothing crashed, "
+        "there's just nothing here that acts on its own.\n"
+        "\n"
+        "To actually see this module do something, run:\n"
+        "    python test_project_manager.py\n"
+    )

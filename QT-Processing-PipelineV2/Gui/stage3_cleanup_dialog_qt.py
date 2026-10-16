@@ -94,6 +94,16 @@ class Stage3CleanupFieldsMixin:
                        "baseline. Leave blank when just cleaning a standalone map - for "
                        "example, when this cloud IS the baseline you're creating.")
 
+        self.add_text_field("icp_overlap", "ICP final overlap (%, optional):", default="")
+        self.add_hint(
+            "Only used with 'Align to'. A whole number from 10 to 100. ICP then uses only "
+            "this share of the points (the best matches) for the final fit. Points that "
+            "match badly (for example junk points, or an area that only one scan "
+            "saw) are left out. Blank = CloudCompare's own default. Try 90 and compare "
+            "the two RMS values. "
+            "A lower value uses fewer points for the fit, so do not go below about 80 "
+            "without a reason.")
+
         output_default = self.resolve_project_output_default(pipeline, "cleanup", ".ply")
         self.add_save_field("output", "Output .ply:", default_ext=".ply", default=output_default)
         self.register_auto_default(
@@ -147,6 +157,8 @@ class Stage3CleanupFieldsMixin:
         except ValueError:
             raise ValueError("SOR neighbors must be an integer and std dev a number.")
 
+        icp_overlap = core.parse_icp_overlap(self.fields["icp_overlap"].get())
+
         active_pipeline = self.get_active_pipeline_for_run()
 
         # CloudCompare doesn't auto-write a distinct RMS/ICP report file -
@@ -155,7 +167,8 @@ class Stage3CleanupFieldsMixin:
         log_path = Path(output).with_name(Path(output).stem + "_cc_log.txt")
         cmd = core.build_cleanup_command(input_ply, output, neighbors, std_dev,
                                           align_to, log_file=log_path,
-                                          pipeline=active_pipeline)
+                                          pipeline=active_pipeline,
+                                          icp_overlap=icp_overlap)
 
         # Snapshot .ply files now, before running, so the actual output can
         # be identified afterward by what's new - see resolve_cleanup_output.
@@ -175,6 +188,10 @@ class Stage3CleanupFieldsMixin:
                 f"SOR settings: {neighbors} neighbors, {std_dev} std dev\n"
                 + (f"Aligned (ICP) to: {align_to}\n" if align_to else
                    "No alignment performed (no baseline given).\n")
+                + ((f"ICP final overlap: {icp_overlap} % (set here)\n" if icp_overlap
+                    else "ICP final overlap: CloudCompare default\n") if align_to else
+                   ("Note: ICP final overlap was entered, but no baseline was given, so "
+                    "no ICP ran and the value was not used.\n" if icp_overlap else ""))
             )
 
             resolved, others, error = core.resolve_cleanup_output(
@@ -231,7 +248,14 @@ class Stage3CleanupFieldsMixin:
                         f"fixed scan position) is expected, not necessarily a "
                         f"problem - it should trend lower once captures come from a "
                         f"fixed test rig. Treat this as a per-run diagnostic, not a "
-                        f"pass/fail number on its own.")
+                        f"pass/fail number on its own.\n"
+                        f"This RMS is the nearest-point distance after the alignment. "
+                        f"It can be much larger than the misalignment that M3C2 sees "
+                        f"along the surface. 'ICP final overlap' (for example 90) "
+                        f"leaves out the worst-matching points and lowers the RMS "
+                        f"only if some points match badly. For the Registration RMS "
+                        f"of Stage 5, use the estimate in the Stage 5 report (from "
+                        f"the M3C2 distances).")
 
             if register_as and resolved:
                 core.register_baseline(register_as, resolved)

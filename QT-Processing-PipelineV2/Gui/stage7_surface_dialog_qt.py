@@ -33,8 +33,8 @@ length in this app.
 Carry fields (update 9): a checkable list, filled from the header of the
 input .ply each time the Input field changes
 (pipeline_core.carryable_ply_fields() - reads only the header, so it is
-fast for any file size). scalar_M3C2_distance and cluster_id are checked
-by default when the input has them; a field you check or clear stays that
+fast for any file size). change_inward, scalar_M3C2_distance and cluster_id
+are checked by default when the input has them; a field you check or clear stays that
 way when the input changes. Every checked field is carried onto the mesh
 (one --carry-field each).
 
@@ -67,9 +67,11 @@ except ImportError:
 
 DEFAULT_BLEND_FILE = CONFIGS_DIR / "ExtraDownsampling.blend"
 DEFAULT_BLENDER_SCRIPT = SCRIPTS_DIR / "blender_surface.py"
-# Checked by default when the input has them: the M3C2 distance (Stage 8
-# colours the mesh by it) and the damage site of each point (Stage 6).
-DEFAULT_CARRY_FIELDS = ["scalar_M3C2_distance", "cluster_id"]
+# Checked by default when the input has them: change_inward (Stage 6 with
+# Find holes: the same sign on every wall, and a value on the hole points -
+# Stage 8 colours the mesh by it when it is there), the M3C2 distance (Stage 8
+# colours the mesh by it otherwise) and the damage site of each point (Stage 6).
+DEFAULT_CARRY_FIELDS = ["change_inward", "scalar_M3C2_distance", "cluster_id"]
 
 # Values saved in configs/ExtraDownsampling.blend, in metres. The fields
 # start with these. test_blender_surface.py checks them against the file.
@@ -264,9 +266,10 @@ class Stage7SurfaceFieldsMixin:
         self._update_carry_fields()
         self.add_hint(
             "The list shows the fields of the input .ply. Each checked field is copied from "
-            "the nearest input point onto each mesh vertex. Default: scalar_M3C2_distance "
-            "(Stage 8 colours the mesh by it) and cluster_id (the damage site of each point), "
-            "when the input has them. You can check more than one field. Clear all fields to "
+            "the nearest input point onto each mesh vertex. Default: change_inward (Stage 6 with "
+            "Find holes: the same sign on every wall, and a value on the hole areas; Stage 8 "
+            "colours the mesh by it when it is there), scalar_M3C2_distance and cluster_id "
+            "(the damage site of each point), when the input has them. You can check more than one field. Clear all fields to "
             "carry nothing. The mesh file keeps each value, but writes each field as a "
             "decimal number (a cluster_id of 3 is written as 3.0). Normals and colours are "
             "not in the list: Blender cannot carry them.")

@@ -42,6 +42,15 @@ RMS sidecar - find_icp_rms_for_path() traces back correctly regardless
 of which downstream file Comparison ends up being, matching
 _on_comparison_picked()'s already-correct behavior below.
 
+Run check (added): before every Run, Stage5RunCheckMixin compares the M3C2
+params file with the fields on the page (registration RMS, normal scale, search
+scale, search depth). A params file does not change when a field changes, so an
+old file would give an old registration error without any message. If the file
+and the page differ, Run asks: No stops the run, Yes runs with the file as it is.
+The mixin hooks into _check_length_plausibility(), the check that
+qt_stage_base._on_run_clicked() already runs first and that stops the run quietly
+when it returns False.
+
 Run standalone:
     pip install PySide6
     python stage5_diff_dialog_qt.py
@@ -82,6 +91,109 @@ def _outside_note(path):
         return (" (all points - points outside the room NOT removed. To remove them, "
                 "run Stage 4 with 'Also write a separate copy...' on)")
     return ""
+
+PARAMS_TOLERANCE_M = 1e-6   # 0.0001 cm: the params file stores the same numbers as the fields
+
+
+def read_m3c2_params_file(path):
+    """Reads the values that Stage 5 cares about from an M3C2 params .txt file
+    (an INI-style file: 'Key=Value' lines). Returns a dict. A key that is not in
+    the file, or not a number, is left out. Returns {} if the file cannot be read."""
+    wanted = {"NormalScale", "SearchScale", "SearchDepth", "RegistrationError"}
+    values = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                key, separator, text = line.strip().partition("=")
+                if not separator:
+                    continue
+                if key in wanted:
+                    try:
+                        values[key] = float(text)
+                    except ValueError:
+                        pass
+                elif key == "RegistrationErrorEnabled":
+                    values[key] = text.strip().lower() == "true"
+    except OSError:
+        return {}
+    return values
+
+
+def params_differences(file_values, field_values):
+    """Compares the params file with the fields on the page.
+    file_values: dict from read_m3c2_params_file().
+    field_values: dict {"NormalScale": metres or None, ...} from the page fields.
+    Returns a list of (label, file_value_m, page_value_m) for each value that
+    is different. A field that is blank (None) is not compared."""
+    labels = (("RegistrationError", "Registration RMS"),
+              ("NormalScale", "Normal scale"),
+              ("SearchScale", "Search/projection scale"),
+              ("SearchDepth", "Search depth"))
+    different = []
+    for key, label in labels:
+        page_value = field_values.get(key)
+        file_value = file_values.get(key)
+        if page_value is None or file_value is None:
+            continue
+        if abs(page_value - file_value) > PARAMS_TOLERANCE_M:
+            different.append((label, file_value, page_value))
+    return different
+
+
+class Stage5RunCheckMixin:
+    """Put this class BEFORE the stage base class in the class list (see
+    Stage5DiffDialog and Stage5DiffPanel below).
+
+    qt_stage_base.py calls self._check_length_plausibility() at the start of every
+    Run, and a False answer stops the run quietly. This class adds one more check
+    to that call: the M3C2 params file must have the same values as the fields on
+    the page. A params file does not change when a field changes. An old file gives
+    an old registration error, and Stage 5 then flags the wrong points."""
+
+    def _check_length_plausibility(self, keys=None):
+        if not super()._check_length_plausibility(keys):
+            return False
+        if keys is not None:        # a helper button, not the main Run
+            return True
+        return self._confirm_params_match_fields()
+
+    def _confirm_params_match_fields(self):
+        """True when the run can go on."""
+        path = self.fields["params"].get().strip()
+        if not path or not Path(path).is_file():
+            return True             # _build_run() reports a missing file
+        file_values = read_m3c2_params_file(path)
+        if not file_values:
+            return True             # not a file that this check can read
+        field_values = {}
+        for key, field in (("NormalScale", "normal_scale"), ("SearchScale", "search_scale"),
+                           ("SearchDepth", "search_depth"),
+                           ("RegistrationError", "registration_rms")):
+            try:
+                field_values[key] = float(self.fields[field].get())
+            except ValueError:
+                field_values[key] = None    # blank, or not a number
+        different = params_differences(file_values, field_values)
+        rms_switched_off = (field_values.get("RegistrationError") is not None
+                            and file_values.get("RegistrationErrorEnabled") is False)
+        if not different and not rms_switched_off:
+            return True
+        lines = [f"  {label}: file {fmt_cm(file_value)}, page {fmt_cm(page_value)}"
+                 for label, file_value, page_value in different]
+        if rms_switched_off:
+            lines.append("  The registration error is switched off in the file.")
+        answer = QMessageBox.question(
+            self, "The params file is not the same as the page",
+            "The M3C2 params file has other values than the fields on this page:\n\n"
+            + "\n".join(lines)
+            + f"\n\nFile: {path}\n\n"
+            "Stage 5 uses the values in the file. It does not use the values on the page.\n\n"
+            "To write the page values into the file, click No. Then push "
+            "'Generate Params File...' and push Run again.\n\n"
+            "Run with the params file as it is?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
+
 
 class Stage5DiffFieldsMixin:
 
@@ -128,6 +240,19 @@ class Stage5DiffFieldsMixin:
         self.form.addLayout(rms_row)
         # Shown in cm; get()/set() stay in metres (see LengthFieldRef).
         self.fields["registration_rms"] = LengthFieldRef(rms_edit, min_cm=0.01, max_cm=50)
+        estimate_btn = QPushButton("Check Registration (quick)...")
+        estimate_btn.setToolTip(
+            "Estimates the registration error from a sample of the two scans. "
+            "No CloudCompare run. Uses the Normal scale, Search scale and Search "
+            "depth below.")
+        estimate_btn.clicked.connect(self._check_registration_quick)
+        self.form.addWidget(estimate_btn)
+        self.add_hint(
+            "'Check Registration (quick)' estimates the right value for this field in "
+            "about 5 to 30 seconds, before you run Stage 5. It uses the Normal scale, "
+            "Search scale and Search depth below, so fill these first (see 'Check Point "
+            "Spacing'). The result is an estimate. The REGISTRATION CHECK at the top of "
+            "the Stage 5 report confirms it.")
         self.add_hint(
             "This feeds M3C2's Level of Detection (LOD) calculation, which is what separates "
             "real change from noise/misalignment. Leave blank if unknown rather than entering "
@@ -136,7 +261,9 @@ class Stage5DiffFieldsMixin:
             "'Load from Stage 3' only ever finds an RMS for a Cleanup-stage file - if "
             "Comparison above is set to a Stage 4 (Segment) output instead, this will "
             "correctly report nothing found (confirmed in testing); pick the Stage 3 "
-            "Cleanup file there instead if you want the RMS auto-filled.")
+            "Cleanup file there instead if you want the RMS auto-filled.\n"
+            "NOTE: This value does not change a params file that you already made. "
+            "Push 'Generate Params File...' again after you change it.")
 
         spacing_row = QHBoxLayout()
         check_spacing_btn = QPushButton("Check Point Spacing (Baseline)...")
@@ -178,7 +305,9 @@ class Stage5DiffFieldsMixin:
             "CloudCompare's own M3C2 dialog and 'Guess params' if you'd rather. If you edit "
             "Normal scale by hand afterward, update these two to match - CloudCompare's own "
             "'Guess params' does NOT do this automatically, which caused a rounded/blunted-"
-            "edges result in testing before this was caught.")
+            "edges result in testing before this was caught.\n"
+            "NOTE: These three values go into the params file only when you push "
+            "'Generate Params File...'. If you change one of them, generate the file again.")
 
         generate_btn = QPushButton("Generate Params File...")
         generate_btn.clicked.connect(self._generate_params_file)
@@ -187,7 +316,11 @@ class Stage5DiffFieldsMixin:
         self.add_file_field("params", "M3C2 params file (.txt):", [("Text files", "*.txt")])
         self.add_hint(
             "Either browse to a params file made via CloudCompare's GUI, or use 'Generate "
-            "Params File...' above to write one directly from the values on this page.")
+            "Params File...' above to write one directly from the values on this page.\n"
+            "WARNING: A params file does not change when you change the fields above. "
+            "If you change Registration RMS, Normal scale, Search scale or Search depth, "
+            "push 'Generate Params File...' again. Make sure this field shows the new file "
+            "before you push Run.")
 
         self.form.addStretch(1)
 
@@ -240,11 +373,11 @@ class Stage5DiffFieldsMixin:
                 f"Baseline: {baseline}{_outside_note(baseline)}\n"
                 f"Comparison: {comparison}{_outside_note(comparison)}\n"
                 f"Params file used: {params}\n"
-                + (f"Registration RMS on hand: {fmt_cm(registration_rms)}. If you used "
-                   f"'Generate Params File...' above, this is already baked into the "
-                   f"params file. If you browsed to a file made via CloudCompare's GUI "
-                   f"instead, make sure its registration-error was set to this value "
-                   f"there.\n"
+                + (f"Registration RMS on hand: {fmt_cm(registration_rms)}. This value is in "
+                   f"the params file only if you pushed 'Generate Params File...' after you "
+                   f"entered it. If you selected a file that you made earlier, or a file made "
+                   f"in CloudCompare, the file keeps its own registration error. Make sure "
+                   f"that value is the same.\n"
                    if registration_rms else
                    "No registration RMS was entered - if the params file's own "
                    "registration-error value is 0 or unset, the significance test will "
@@ -276,6 +409,42 @@ class Stage5DiffFieldsMixin:
                 elif error:
                     summary += f"\n=== OUTPUT ===\n{error}\n"
 
+            # Registration check: the spread of the M3C2 distances (robust).
+            # The block goes to the TOP of the report, with a one-line verdict,
+            # so that it is not missed in the long report.
+            # The ICP RMS of Stage 3 is a point-to-point distance. M3C2 works
+            # along the surface normal, so the two can differ a lot (real test:
+            # ICP 5.35 cm, M3C2 spread 0.31 cm). This estimate is the one that
+            # the M3C2 significance test needs. It never stops the run.
+            result_ply = None
+            if resolved_state.get("output"):
+                result_ply = core.find_m3c2_result([resolved_state["output"]])
+            if result_ply is None:
+                result_ply = core.find_m3c2_result(
+                    core.find_new_ply_files(output_dir, existing_ply_before))
+            estimate = core.robust_m3c2_spread(result_ply) if result_ply else None
+            registration_block = ""
+            if estimate:
+                try:
+                    entered_rms = float(registration_rms) if registration_rms else None
+                except ValueError:
+                    entered_rms = None
+                registration_block = (
+                    "=== REGISTRATION CHECK: "
+                    + core.registration_headline(entered_rms, estimate) + " ===\n"
+                    + core.registration_advice(entered_rms, estimate) + "\n\n")
+                if "extra_fields" in resolved_state:
+                    resolved_state["extra_fields"]["registration_estimate_robust"] = \
+                        round(estimate["robust_sigma"], 6)
+                    resolved_state["extra_fields"]["m3c2_median_offset"] = \
+                        round(estimate["median"], 6)
+            else:
+                registration_block = (
+                    "=== REGISTRATION CHECK: NO ESTIMATE ===\n"
+                    "No estimate: the result file with the M3C2 distance was not found, "
+                    "or it has too few distances, or the Python package plyfile is not "
+                    "installed.\n\n")
+
             summary += (
                 "\n=== NEXT STEPS ===\n"
                 "Open the result in CloudCompare, set the active scalar field to "
@@ -283,6 +452,8 @@ class Stage5DiffFieldsMixin:
                 "blue = negative, magnitude = degree of change. Then use it as the "
                 "input to Stage 6 (Classify)."
             )
+
+            summary = registration_block + summary
 
             annotated = core.annotate_log_file(log_path, "Stage 5: Diff (M3C2)", cmd)
             if annotated:
@@ -429,6 +600,66 @@ class Stage5DiffFieldsMixin:
             "a file via CloudCompare's own GUI instead, or share that value so the "
             "generator can be extended.")
 
+    def _check_registration_quick(self):
+        """Estimate the registration error before Stage 5 runs, without
+        CloudCompare (core.quick_registration_estimate). Shows the result and
+        asks if it must be put in the Registration RMS field. A synchronous
+        call with a wait cursor, same as 'Check Point Spacing'."""
+        baseline = self.fields["baseline"].get().strip()
+        comparison = self.fields["comparison"].get().strip()
+        for path, name in ((baseline, "Baseline"), (comparison, "Comparison")):
+            if not path or not Path(path).exists():
+                QMessageBox.critical(
+                    self, f"No {name.lower()} file",
+                    f"Fill in a valid {name} .ply file first.")
+                return
+        baseline = self._offer_envelope_filtered("baseline", baseline, "Baseline")
+        comparison = self._offer_envelope_filtered("comparison", comparison, "Comparison")
+
+        scales = {}
+        for key, name in (("normal_scale", "Normal scale"),
+                          ("search_scale", "Search scale"),
+                          ("search_depth", "Search depth")):
+            try:
+                scales[key] = float(self.fields[key].get().strip())
+            except ValueError:
+                QMessageBox.critical(
+                    self, f"{name} is empty",
+                    f"Fill in the {name} first. Push 'Check Point Spacing (Baseline)...' "
+                    "to fill the three scale fields.")
+                return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            estimate, message = core.quick_registration_estimate(
+                baseline, comparison, scales["normal_scale"], scales["search_scale"],
+                scales["search_depth"])
+        finally:
+            QApplication.restoreOverrideCursor()
+        if estimate is None:
+            QMessageBox.warning(self, "Check Registration (quick)", message)
+            return
+
+        try:
+            entered = self.fields["registration_rms"].get().strip()
+            entered_rms = float(entered) if entered else None
+        except ValueError:
+            entered_rms = None
+        sigma = estimate["robust_sigma"]
+        text = (
+            f"{core.registration_headline(entered_rms, estimate)}\n\n"
+            f"This is an estimate from {estimate['n_core']} sample points. It does not "
+            "use CloudCompare.\n\n"
+            + core.registration_advice(entered_rms, estimate)
+            + f"\n\nPut {sigma * 100:.2f} cm in 'Registration RMS'?\n"
+            "After that, push 'Generate Params File...' again.")
+        answer = QMessageBox.question(
+            self, "Check Registration (quick)", text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.fields["registration_rms"].set(f"{sigma:.6f}")
+
     def _check_point_spacing(self):
         """Real point-spacing check - matches pipeline_applet.py's
         check_point_spacing() exactly: a SYNCHRONOUS, blocking
@@ -499,12 +730,14 @@ class Stage5DiffFieldsMixin:
             f"  Normal scale: {fmt_cm(round(normal_scale, 4))}\n"
             f"  Search scale: {fmt_cm(round(search_scale, 4))}  (0.5x normal)\n"
             f"  Search depth: {fmt_cm(round(search_depth, 4))}  (2x normal)\n"
-            f"These values replace the values that were in those three fields."
+            f"These values replace the values that were in those three fields.\n"
+            f"The params file does not change yet. Push 'Generate Params File...' "
+            f"to write these values into the file."
         )
         QMessageBox.information(self, "Point Spacing (Baseline)", output)
 
 
-class Stage5DiffDialog(QStageDialog, Stage5DiffFieldsMixin):
+class Stage5DiffDialog(Stage5RunCheckMixin, QStageDialog, Stage5DiffFieldsMixin):
     """Standalone popup - run this file directly to open just this
     dialog."""
 
@@ -513,7 +746,7 @@ class Stage5DiffDialog(QStageDialog, Stage5DiffFieldsMixin):
         self._build_diff_fields(pipeline=pipeline)
 
 
-class Stage5DiffPanel(QStagePanel, Stage5DiffFieldsMixin):
+class Stage5DiffPanel(Stage5RunCheckMixin, QStagePanel, Stage5DiffFieldsMixin):
     """Embeddable panel - used by pipeline_applet_qt_template.py as a
     page of stageStack."""
 

@@ -40,6 +40,12 @@ point's M3C2 distance) and, when --flagged has a 'cluster_id' field
 (m3c2_classify.py with clustering on), cluster_id (the nearest flagged
 point's damage site, so a detail point can be matched to its site).
 
+If --flagged has a 'change_inward' field (Stage 6 with "Find holes"), that
+field is carried instead of the M3C2 distance: its sign has the same meaning
+on every wall (+ added, - removed), and the points of a hole have a value.
+It is still written under the name scalar_M3C2_distance, so Stage 8 colours
+it as before.
+
 The distance field is named scalar_M3C2_distance - the name CloudCompare
 itself uses when it writes a PLY. A PLY property name cannot contain a
 space, so the earlier name 'M3C2 distance' made the write fail with
@@ -78,13 +84,21 @@ def find_distance_field(vertex):
     return fallback[0] if fallback else None
 
 
+def find_value_field(vertex):
+    """The field to carry: 'change_inward' when the file has it (Stage 6 with
+    "Find holes"), else the M3C2 distance field."""
+    if "change_inward" in (vertex.data.dtype.names or ()):
+        return "change_inward"
+    return find_distance_field(vertex)
+
+
 def load_flagged(path):
     print(f"Reading flagged points: {path}")
     ply = PlyData.read(str(path))
     if "vertex" not in ply:
         raise ValueError(f"'{path}' has no vertex data.")
     vertex = ply["vertex"]
-    field_name = find_distance_field(vertex)
+    field_name = find_value_field(vertex)
     if field_name is None:
         raise ValueError(
             f"'{path}': no M3C2/distance field found. Available fields: "
