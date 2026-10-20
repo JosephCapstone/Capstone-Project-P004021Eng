@@ -1,1 +1,9 @@
-worker-deps/
+.venv/
+logs/
+__pycache__/
+*.pyc
+
+# Generated runtime validation artifacts
+/tests/*.png
+/tests/*_result.json
+/tests/*_fixture.usda

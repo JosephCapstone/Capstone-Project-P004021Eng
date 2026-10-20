@@ -1,7 +1,7 @@
 [package]
 title = "DELTA"
-description = "Isaac Sim damage inspection and PLY-to-USD application"
-version = "0.5.0"
+description = "Isaac Sim damage inspection and cluster inspection and Blender processing application"
+version = "0.8.0"
 
 [dependencies]
 "isaacsim.exp.base.python" = {}
@@ -10,11 +10,35 @@ version = "0.5.0"
 [settings]
 # DELTA uses local PLY/USD workflows; do not auto-start a ROS bridge.
 isaac.startup.ros_bridge_extension = ""
+# Retained viewer fill: keep the shaded side readable without washing it out.
+rtx.sceneDb.ambientLightColor = [1.0, 1.0, 1.0]
+rtx.sceneDb.ambientLightIntensity = 0.08
+# Preserve the viewer mode used in the retained v05 changes.
+rtx.rendermode = "MinimalRendering"
+persistent.rtx.modes.minimal.enabled = true
+# Keep the section-capable renderer available for temporary slice mode.
+persistent.rtx.modes.rt.enabled = true
 
 [settings.app]
 name = "DELTA"
-version = "0.5.0"
+version = "0.8.0"
 settings.persistent = true
+runLoops.main.rateLimitEnabled = true
+runLoops.main.rateLimitFrequency = 30
+runLoops.main.rateLimitUseBusyLoop = false
+runLoops.present.rateLimitEnabled = true
+runLoops.present.rateLimitFrequency = 30
+runLoops.rendering_0.rateLimitEnabled = true
+runLoops.rendering_0.rateLimitFrequency = 30
 
 [settings.app.window]
 title = "DELTA"
+
+[settings.app.viewport]
+# Keep performance diagnostics out of the operator view.
+forceHideFps = true
+
+[settings.exts."omni.kit.viewport.menubar.camera"]
+# DELTA provides its own simple View selector.
+visible = false
+expand = false

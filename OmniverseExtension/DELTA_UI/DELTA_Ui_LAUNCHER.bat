@@ -1,8 +1,9 @@
 @echo off
 setlocal
+if not defined DELTA_PIPELINE_PYTHON if exist "%~dp0.venv\Scripts\python.exe" set "DELTA_PIPELINE_PYTHON=%~dp0.venv\Scripts\python.exe"
 
-rem Set ISAAC_SIM_ROOT externally to use a different Isaac Sim installation.
-if not defined ISAAC_SIM_ROOT set "ISAAC_SIM_ROOT=C:\isaacsim"
+if not defined ISAAC_SIM_ROOT if exist "C:\isaacsim\kit\kit.exe" set "ISAAC_SIM_ROOT=C:\isaacsim"
+if not defined ISAAC_SIM_ROOT if exist "%USERPROFILE%\Downloads\isaac-sim-standalone-6.1.0-windows-x86_64\kit\kit.exe" set "ISAAC_SIM_ROOT=%USERPROFILE%\Downloads\isaac-sim-standalone-6.1.0-windows-x86_64"
 set "KIT_EXECUTABLE=%ISAAC_SIM_ROOT%\kit\kit.exe"
 
 if not exist "%KIT_EXECUTABLE%" (
@@ -11,7 +12,6 @@ if not exist "%KIT_EXECUTABLE%" (
     exit /b 1
 )
 
-rem Open the DELTA experience directly; no ROS environment setup is needed.
 "%KIT_EXECUTABLE%" "%~dp0delta.robot.app.kit" ^
     --ext-folder "%ISAAC_SIM_ROOT%\apps" ^
     --ext-folder "%ISAAC_SIM_ROOT%\exts" ^

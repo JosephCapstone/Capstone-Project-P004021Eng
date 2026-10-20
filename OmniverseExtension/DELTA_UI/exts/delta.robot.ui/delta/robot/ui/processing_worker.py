@@ -42,10 +42,6 @@ def build_usd(baseline_path, inspection_path, output_path, quality_name, report)
     if not python.is_file():
         python = kit / "python.exe"
     if not python.is_file():
-        python = kit / "python" / "bin" / "python3"
-    if not python.is_file():
-        python = kit / "python3"
-    if not python.is_file():
         raise RuntimeError("Isaac Sim Python executable was not found")
     # Keep Isaac Sim Python paths out of the worker environment.
     env = os.environ.copy()
@@ -74,10 +70,9 @@ def build_usd(baseline_path, inspection_path, output_path, quality_name, report)
 # Load processing libraries only inside the worker process.
 if __name__ == "__main__":
     root = Path(__file__).resolve().parents[5]
-    deps = root / "worker-deps"
-    if not (deps / "open3d").is_dir():
-        raise SystemExit("Processing dependencies are missing. Run setup_worker.py with Isaac Sim Python; see README.md.")
+    deps = Path.home() / "AppData/Local/ov/data/Kit/DELTA/0.5/pip3-envs/default-3.12"
     sys.path.insert(0, str(deps))
+    sys.path.insert(0, str(root / "worker-deps"))
     sys.path.insert(0, str(Path(__file__).parent))
     from point_cloud_pipeline import build_usd as process_cloud
     result = process_cloud(sys.argv[1], sys.argv[2] or None, sys.argv[3], sys.argv[4],

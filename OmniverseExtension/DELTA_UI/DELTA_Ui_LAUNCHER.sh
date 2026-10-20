@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Set ISAAC_SIM_ROOT externally to use a different Isaac Sim installation.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ISAAC_SIM_ROOT="${ISAAC_SIM_ROOT:-$SCRIPT_DIR/../isaac-sim-standalone-6.1.0-linux-x86_64}"
 KIT_EXECUTABLE="$ISAAC_SIM_ROOT/kit/kit"
@@ -12,7 +11,6 @@ if [[ ! -x "$KIT_EXECUTABLE" ]]; then
     exit 1
 fi
 
-# Open the DELTA experience directly, without sourcing a ROS environment.
 exec "$KIT_EXECUTABLE" "$SCRIPT_DIR/delta.robot.app.kit" \
     --ext-folder "$ISAAC_SIM_ROOT/apps" \
     --ext-folder "$ISAAC_SIM_ROOT/exts" \

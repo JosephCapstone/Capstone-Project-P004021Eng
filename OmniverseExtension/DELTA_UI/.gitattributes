@@ -1,3 +1,4 @@
-# Linux shell scripts need LF line endings, even when checked out on Windows.
+# Shell launchers must remain executable as shell scripts after Windows checkout.
 *.sh text eol=lf
-*.bat text eol=crlf
+# Preserve exact upstream bytes recorded in PIPELINE_MANIFEST.json.
+QT-Processing-PipelineV2/** -text
