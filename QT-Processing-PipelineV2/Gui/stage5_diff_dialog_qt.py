@@ -67,7 +67,7 @@ from PySide6.QtWidgets import (
 )
 
 from qt_stage_base import (QStageDialog, QStagePanel, LengthFieldRef, SCRIPTS_DIR,
-                           fmt_cm)
+                           fmt_cm, diff_input_default, _same_value)
 
 try:
     import project_manager as pm
@@ -195,6 +195,18 @@ class Stage5RunCheckMixin:
         return answer == QMessageBox.Yes
 
 
+def _default_registration_rms(pipeline):
+    """Update 28. The ICP RMS of the Stage 3 run of the Comparison scan, in
+    metres as text, or "" (never raises)."""
+    if pm is None or pipeline is None or getattr(pipeline, "kind", None) != "diff":
+        return ""
+    try:
+        value = pm.get_diff_inputs(pipeline)["registration_error_used"]
+        return f"{float(value):.6f}" if value is not None else ""
+    except Exception:
+        return ""
+
+
 class Stage5DiffFieldsMixin:
 
     def _build_diff_fields(self, pipeline=None):
@@ -211,6 +223,8 @@ class Stage5DiffFieldsMixin:
             "baseline",
             lambda: pm.list_side_candidates(
                 self.pipeline.project, self.pipeline.entry["reference"]))
+        self.register_auto_default(
+            "baseline", lambda p: diff_input_default(p, "reference"), fill_now=True)
         self.add_registered_baseline_preset("baseline", stacked=True)
         self.form = self._layout_stack.pop()
 
@@ -223,47 +237,9 @@ class Stage5DiffFieldsMixin:
             lambda: pm.list_side_candidates(
                 self.pipeline.project, self.pipeline.entry["comparison"]),
             extra_on_pick=self._on_comparison_picked)
+        self.register_auto_default(
+            "comparison", lambda p: diff_input_default(p, "comparison"), fill_now=True)
         self.form = self._layout_stack.pop()
-        self.add_hint(
-            "For a Stage 4 (Segment) output, use the file marked 'outside-room points "
-            "removed' (<name>_envelope_filtered.ply). It does not have the scan noise and "
-            "the returns from beyond the walls, which can show as false damage. If you "
-            "choose <name>_classified.ply and the filtered copy exists, Run asks which one "
-            "to use.")
-
-        rms_row = self._row("Registration RMS (cm, from Stage 3):")
-        rms_edit = QLineEdit()
-        rms_row.addWidget(rms_edit, 1)
-        load_rms_btn = QPushButton("Load from Stage 3")
-        load_rms_btn.clicked.connect(self._load_rms_from_sidecar)
-        rms_row.addWidget(load_rms_btn, 0)
-        self.form.addLayout(rms_row)
-        # Shown in cm; get()/set() stay in metres (see LengthFieldRef).
-        self.fields["registration_rms"] = LengthFieldRef(rms_edit, min_cm=0.01, max_cm=50)
-        estimate_btn = QPushButton("Check Registration (quick)...")
-        estimate_btn.setToolTip(
-            "Estimates the registration error from a sample of the two scans. "
-            "No CloudCompare run. Uses the Normal scale, Search scale and Search "
-            "depth below.")
-        estimate_btn.clicked.connect(self._check_registration_quick)
-        self.form.addWidget(estimate_btn)
-        self.add_hint(
-            "'Check Registration (quick)' estimates the right value for this field in "
-            "about 5 to 30 seconds, before you run Stage 5. It uses the Normal scale, "
-            "Search scale and Search depth below, so fill these first (see 'Check Point "
-            "Spacing'). The result is an estimate. The REGISTRATION CHECK at the top of "
-            "the Stage 5 report confirms it.")
-        self.add_hint(
-            "This feeds M3C2's Level of Detection (LOD) calculation, which is what separates "
-            "real change from noise/misalignment. Leave blank if unknown rather than entering "
-            "0 - a 0 collapses the LOD toward zero and flags almost everything as "
-            "significant, which is worse than not running the significance test at all. "
-            "'Load from Stage 3' only ever finds an RMS for a Cleanup-stage file - if "
-            "Comparison above is set to a Stage 4 (Segment) output instead, this will "
-            "correctly report nothing found (confirmed in testing); pick the Stage 3 "
-            "Cleanup file there instead if you want the RMS auto-filled.\n"
-            "NOTE: This value does not change a params file that you already made. "
-            "Push 'Generate Params File...' again after you change it.")
 
         spacing_row = QHBoxLayout()
         check_spacing_btn = QPushButton("Check Point Spacing (Baseline)...")
@@ -284,15 +260,10 @@ class Stage5DiffFieldsMixin:
             self._range_choice_group.addButton(radio)
             self._range_choice_values[radio] = value
             spacing_row.addWidget(radio)
+            if value == "min":
+                first_range_radio = radio
         spacing_row.addStretch(1)
         self.form.addLayout(spacing_row)
-        self.add_hint(
-            "Min = tightest normal scale in the suggested range (best for resolving small "
-            "damage/sharp edges, but noisier if too close to raw point spacing). Max = "
-            "smoothest (safest against noise, but blunts small features and corners - this "
-            "is what caused the earlier rounded-edges result). Mid is a balanced starting "
-            "point. Search scale/depth are filled automatically as 0.5x/2x of normal scale, "
-            "matching a confirmed-working reference file.")
 
         self.add_length_field("normal_scale", "Normal scale (diameter, cm):",
                               min_cm=0.1, max_cm=200)
@@ -300,27 +271,159 @@ class Stage5DiffFieldsMixin:
                               min_cm=0.05, max_cm=100)
         self.add_length_field("search_depth", "Search depth (max depth, cm):",
                               min_cm=0.1, max_cm=500)
-        self.add_hint(
-            "Filled automatically by 'Check Point Spacing' above, or set manually / via "
-            "CloudCompare's own M3C2 dialog and 'Guess params' if you'd rather. If you edit "
-            "Normal scale by hand afterward, update these two to match - CloudCompare's own "
-            "'Guess params' does NOT do this automatically, which caused a rounded/blunted-"
-            "edges result in testing before this was caught.\n"
-            "NOTE: These three values go into the params file only when you push "
-            "'Generate Params File...'. If you change one of them, generate the file again.")
+
+        rms_row = self._row("Registration RMS (cm, from Stage 3):")
+        rms_edit = QLineEdit()
+        rms_row.addWidget(rms_edit, 1)
+        load_rms_btn = QPushButton("Load from Stage 3")
+        load_rms_btn.clicked.connect(self._load_rms_from_sidecar)
+        rms_row.addWidget(load_rms_btn, 0)
+        self.form.addLayout(rms_row)
+        # Shown in cm; get()/set() stay in metres (see LengthFieldRef).
+        self.fields["registration_rms"] = LengthFieldRef(rms_edit, min_cm=0.01, max_cm=50)
+        # Update 28: the RMS of the Comparison scan follows the selected diff pipeline.
+        self.register_auto_default("registration_rms", _default_registration_rms,
+                                   fill_now=True)
+        estimate_btn = QPushButton("Check Registration (quick)...")
+        estimate_btn.setToolTip(
+            "Estimates the registration error from a sample of the two scans. "
+            "No CloudCompare run. Uses the Normal scale, Search scale and Search "
+            "depth above.")
+        estimate_btn.clicked.connect(self._check_registration_quick)
+        self.form.addWidget(estimate_btn)
 
         generate_btn = QPushButton("Generate Params File...")
         generate_btn.clicked.connect(self._generate_params_file)
         self.form.addWidget(generate_btn)
+        # Update 28: one highlighted note for all four values (it replaces the
+        # three separate notes), and a red line that shows only when a value
+        # changed after the last Generate.
+        params_note = QLabel(
+            "NOTE: A params file does not change when you change Registration RMS, Normal "
+            "scale, Search scale or Search depth. Push 'Generate Params File...' again "
+            "after a change. Make sure that 'M3C2 params file' shows the new file before "
+            "you push Run.")
+        params_note.setWordWrap(True)
+        params_note.setStyleSheet(
+            "background-color: #fff3cd; color: #5c4400; border: 1px solid #e0b800; "
+            "padding: 4px;")
+        self.form.addWidget(params_note)
+        self.params_stale_label = QLabel(
+            "A value changed after the last params file was made. Push 'Generate Params "
+            "File...' again.")
+        self.params_stale_label.setWordWrap(True)
+        self.params_stale_label.setStyleSheet("color: #bb0000; font-weight: bold;")
+        self.params_stale_label.setVisible(False)
+        self.form.addWidget(self.params_stale_label)
+        self._params_snapshot = None
+        for key in self.PARAMS_VALUE_KEYS:
+            self.fields[key].widget.textChanged.connect(self._update_params_stale)
 
         self.add_file_field("params", "M3C2 params file (.txt):", [("Text files", "*.txt")])
-        self.add_hint(
-            "Either browse to a params file made via CloudCompare's GUI, or use 'Generate "
-            "Params File...' above to write one directly from the values on this page.\n"
-            "WARNING: A params file does not change when you change the fields above. "
-            "If you change Registration RMS, Normal scale, Search scale or Search depth, "
-            "push 'Generate Params File...' again. Make sure this field shows the new file "
-            "before you push Run.")
+
+        # Update 29: the explanations are in "?" popups (what it does, what the
+        # options do, when to change it).
+        self.add_help(
+            "baseline",
+            "The reference cloud: the compartment as it was before the change. Stage 5 "
+            "measures the distance from this cloud to the comparison cloud.",
+            when="Change it to compare against another baseline. 'Choose from project...' "
+                 "lists the files of this project. 'Or pick a manual-mode registered "
+                 "baseline' lists the baselines of baseline_registry.json.",
+            note="For a Stage 4 (Segment) output, use the file marked 'outside-room points "
+                 "removed' (<name>_envelope_filtered.ply). It does not have the scan noise "
+                 "and the returns from beyond the walls, which can show as false damage. If "
+                 "you choose <name>_classified.ply and the filtered copy exists, Run asks "
+                 "which one to use.")
+        self.add_help(
+            "comparison",
+            "The cloud that you compare to the baseline: the later scan, with the possible "
+            "damage.",
+            when="Change it to compare another scan. In project mode the box fills from "
+                 "the selected pipeline.",
+            note="For a Stage 4 (Segment) output, use the file marked 'outside-room points "
+                 "removed' (<name>_envelope_filtered.ply). It does not have the scan noise "
+                 "and the returns from beyond the walls, which can show as false damage. If "
+                 "you choose <name>_classified.ply and the filtered copy exists, Run asks "
+                 "which one to use.")
+        self.add_help(
+            first_range_radio,
+            "Selects the Normal scale that 'Check Point Spacing' puts in the box, from the "
+            "range that it suggests. The button also sets Search scale to 0.5 times and "
+            "Search depth to 2 times the Normal scale.",
+            effects=[
+                ("Min", "the smallest scale of the range. It resolves small damage and "
+                        "sharp edges. The result is noisier when the scale is close to the "
+                        "point spacing."),
+                ("Mid", "a balance of the two. It is a good first value."),
+                ("Max", "the largest scale of the range. It is the safest against noise. "
+                        "It rounds small features and corners."),
+            ],
+            when="Use it before you push 'Check Point Spacing'. Change it when the result "
+                 "is too noisy (use a larger scale) or too round (use a smaller scale).")
+        self.add_help(
+            "normal_scale",
+            "The diameter of the sphere that M3C2 uses to find the surface direction "
+            "(the normal) at each point.",
+            effects=[
+                ("Smaller", "small damage and sharp edges are resolved. The result is "
+                            "noisier."),
+                ("Larger", "the result is smoother and safer against noise. Small features "
+                           "and corners become round."),
+            ],
+            when="'Check Point Spacing' fills the box. Change it by hand if the result is "
+                 "too noisy or too round. You can also use 'Guess params' of CloudCompare.",
+            note="After you change the Normal scale by hand, change Search scale and "
+                 "Search depth to match. CloudCompare 'Guess params' does not do this "
+                 "automatically. A Search scale that does not match gives round edges.")
+        self.add_help(
+            "search_scale",
+            "The diameter of the cylinder that M3C2 uses to find the points on each side "
+            "of the surface (projection scale).",
+            effects=[
+                ("Smaller", "fewer points in the cylinder. The distances are noisier."),
+                ("Larger", "more points in the cylinder. The distances are smoother and "
+                           "small features are blurred."),
+            ],
+            when="You changed the Normal scale. Set this value to 0.5 times the Normal "
+                 "scale. 'Check Point Spacing' fills it.")
+        self.add_help(
+            "search_depth",
+            "The length of the cylinder along the normal. M3C2 measures only changes "
+            "that are inside this depth.",
+            effects=[
+                ("Smaller", "a change that is deeper than this value gets no distance."),
+                ("Larger", "deeper changes are measured. A cylinder that is too long can "
+                           "find a different surface behind the first one."),
+            ],
+            when="You changed the Normal scale. Set this value to 2 times the Normal "
+                 "scale. 'Check Point Spacing' fills it. Raise it if you must measure "
+                 "deeper damage.")
+        self.add_help(
+            "registration_rms",
+            "The registration error of the comparison scan from Stage 3 (ICP RMS). M3C2 "
+            "uses it to calculate the Level of Detection (LOD). The LOD separates real "
+            "change from noise and misalignment.",
+            effects=[
+                ("Smaller", "a small LOD. More points count as significant change."),
+                ("Larger", "a large LOD. Fewer points count as change. Small damage can "
+                           "be missed."),
+                ("Empty", "the significance test uses no registration error."),
+            ],
+            when="'Load from Stage 3' fills the box from the Cleanup file of the "
+                 "comparison. 'Check Registration (quick)' estimates the value in 5 to 30 "
+                 "seconds, before you run Stage 5. Fill Normal scale, Search scale and "
+                 "Search depth first. On a SLAM map the ICP RMS can be large. Stage 6 can "
+                 "replace it with a value that it measures from the distances, and it reads "
+                 "the value that you enter here. You do not need to run Stage 5 again.",
+            note="Do not enter 0. A 0 makes the LOD almost zero and almost every point "
+                 "counts as significant. Leave the box empty if you do not know the value.")
+        self.add_help(
+            "params",
+            "The M3C2 parameter file (.txt) that CloudCompare reads when Run starts.",
+            when="Use 'Generate Params File...' to write the file from the values on this "
+                 "page. Or browse to a file that you made in the CloudCompare GUI. Make "
+                 "the file again after you change a value.")
 
         self.form.addStretch(1)
 
@@ -545,6 +648,21 @@ class Stage5DiffFieldsMixin:
                 "output instead, this is expected - pick the underlying Stage 3 Cleanup "
                 "file there instead if you want the RMS auto-filled.")
 
+    PARAMS_VALUE_KEYS = ("registration_rms", "normal_scale", "search_scale", "search_depth")
+
+    def _params_values(self):
+        return tuple(self.fields[k].get().strip() for k in self.PARAMS_VALUE_KEYS)
+
+    def _update_params_stale(self, *_args):
+        """Red line: shown only when one of the four values is not the value
+        that the last 'Generate Params File...' of this page used."""
+        snapshot = getattr(self, "_params_snapshot", None)
+        stale = snapshot is not None and not all(
+            _same_value(a, b) for a, b in zip(snapshot, self._params_values()))
+        label = getattr(self, "params_stale_label", None)
+        if label is not None:
+            label.setVisible(bool(stale))
+
     def _generate_params_file(self):
         try:
             normal_scale = float(self.fields["normal_scale"].get())
@@ -588,6 +706,8 @@ class Stage5DiffFieldsMixin:
         core.generate_m3c2_params_file(
             save_path, normal_scale, search_scale, search_depth, reg_rms_val)
         self.fields["params"].set(save_path)
+        self._params_snapshot = self._params_values()
+        self._update_params_stale()
         self._show_success(
             "Params file generated",
             f"Saved to:\n{save_path}\n\n"
@@ -595,10 +715,9 @@ class Stage5DiffFieldsMixin:
                "inside this diff's own output folder - no save location to pick by "
                "hand.\n\n" if auto_named else "")
             + "Every setting besides these four values (normal/search scale, search depth, "
-            "registration error) is copied from a confirmed-working reference file. If you "
-            "need to change something else (subsample radius, normal mode, etc.), generate "
-            "a file via CloudCompare's own GUI instead, or share that value so the "
-            "generator can be extended.")
+            "registration error) is copied from a reference file. If you need to change "
+            "something else (subsample radius, normal mode, etc.), make a file with the "
+            "CloudCompare GUI instead.")
 
     def _check_registration_quick(self):
         """Estimate the registration error before Stage 5 runs, without

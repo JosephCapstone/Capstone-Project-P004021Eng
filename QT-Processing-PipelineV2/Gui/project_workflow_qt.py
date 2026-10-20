@@ -19,6 +19,14 @@ showed the whole app as "Not Responding". Any failure (ProjectError,
 or an OSError such as a full disk) is reported, and a partly created
 folder is named so it can be deleted before a retry (project_manager
 refuses to reuse an existing folder).
+
+Update 23 - import of a point cloud: if the source is a .ply file, New
+Project and New Scan do not expect a sensor recording. They import the
+cloud (pm.create_project_from_cloud / pm.add_scan_from_cloud with
+pipeline_core.import_point_cloud). The original file goes to 00_raw. The
+standard point cloud is recorded as the output of Stage 1, marked as
+imported, so Stage 2 (Level) is the next stage. The result is shown in a
+message (number of points, size, fields, and the changes that were made).
 """
 import threading
 from pathlib import Path
@@ -33,6 +41,11 @@ try:
     import project_manager as pm
 except ImportError:
     pm = None
+
+try:
+    import pipeline_core as core
+except ImportError:
+    core = None
 
 
 class _TaskBridge(QObject):
@@ -103,7 +116,11 @@ def _guess_source_type(path_str):
     VALID_SOURCE_TYPES ('pcap', 'osf', 'ros1_bag', 'ros2_bag'), auto-
     detecting from what's given. Returns None if it can't tell. Ported
     directly from pipeline_applet.py's module-level function of the
-    same name."""
+    same name.
+
+    Update 23: a .ply file gives 'ply'. This is NOT one of VALID_SOURCE_TYPES.
+    It means an import of a point cloud that was made outside the pipeline
+    (project_manager.create_project_from_cloud / add_scan_from_cloud)."""
     path = Path(path_str)
     if not path.exists():
         return None
@@ -118,7 +135,25 @@ def _guess_source_type(path_str):
         return "osf"
     if suffix == ".bag":
         return "ros1_bag"
+    if suffix == ".ply":
+        return "ply"
     return None
+
+
+def _import_text(entry):
+    """The message after an import: made from the record of the Stage 1
+    entry (the stage 'slam' of the new baseline or scan)."""
+    stage = entry["stages"]["slam"]
+    info = {
+        "n_points": stage.get("n_points"),
+        "extent": stage.get("extent"),
+        "median_spacing": stage.get("median_spacing"),
+        "fields": stage.get("fields"),
+        "notes": stage.get("import_notes", []),
+    }
+    if core is not None:
+        return core.import_point_cloud_text(info)
+    return f"Points: {info['n_points']}"
 
 
 def _hint(text):
@@ -156,6 +191,11 @@ def _source_field(parent_layout, row, label_text):
     return edit
 
 
+_SOURCE_ERROR = ("Expected a .pcap, .osf, or .bag file, a folder containing a "
+                 "ROS2 bag (a metadata.yaml file alongside .db3 files), or a "
+                 ".ply point cloud file.")
+
+
 class NewProjectDialog(QDialog):
     """Asks for a folder location, a compartment name, and a raw source
     file - then creates the project (and its baseline pipeline) and
@@ -189,12 +229,14 @@ class NewProjectDialog(QDialog):
         row += 1
 
         self.source_edit = _source_field(
-            form, row, "Baseline raw source (pcap / OSF / .bag / ROS2 bag folder):")
+            form, row, "Baseline raw source (pcap / OSF / .bag / ROS2 bag folder / .ply cloud):")
         row += 1
 
         form.addWidget(_hint(
             "Source type (pcap/OSF/ROS1 bag/ROS2 bag) is auto-detected from what "
-            "you pick above."), row, 0, 1, 3)
+            "you pick above. A .ply file is imported as a point cloud that is "
+            "already made: Stage 1 (SLAM) is skipped, and Stage 2 (Level) is next. "
+            "The coordinates must be in metres."), row, 0, 1, 3)
         row += 1
 
         create_btn = QPushButton("Create Project")
@@ -224,13 +266,31 @@ class NewProjectDialog(QDialog):
             QMessageBox.critical(
                 self, "Can't determine source type",
                 f"Couldn't tell what kind of source this is from:\n{source}\n\n"
-                "Expected a .pcap, .osf, or .bag file, or a folder containing a "
-                "ROS2 bag (a metadata.yaml file alongside .db3 files).")
+                + _SOURCE_ERROR)
             return
 
         def done(project):
+            if source_type == "ply":
+                QMessageBox.information(
+                    self, "Point cloud imported",
+                    "The point cloud is the output of Stage 1. The next stage is "
+                    "Stage 2 (Level).\n\n"
+                    + _import_text(project.data["baseline"]))
             self.accept()
             self.on_created(project)
+
+        if source_type == "ply":
+            if core is None:
+                QMessageBox.critical(self, "Not available", "pipeline_core.py could not be imported.")
+                return
+            _run_blocking_task(
+                self, "Import point cloud",
+                "Creating the project and importing the point cloud.\n"
+                "A large file can take some minutes.",
+                lambda: pm.create_project_from_cloud(
+                    location, compartment, source, core.import_point_cloud),
+                done, watch_dir=location)
+            return
 
         _run_blocking_task(
             self, "Create project",
@@ -270,7 +330,13 @@ class NewScanDialog(QDialog):
         row += 1
 
         self.source_edit = _source_field(
-            form, row, "Raw source (pcap / OSF / .bag / ROS2 bag folder):")
+            form, row, "Raw source (pcap / OSF / .bag / ROS2 bag folder / .ply cloud):")
+        row += 1
+
+        form.addWidget(_hint(
+            "A .ply file is imported as a point cloud that is already made: "
+            "Stage 1 (SLAM) is skipped, and Stage 2 (Level) is next. "
+            "The coordinates must be in metres."), row, 0, 1, 3)
         row += 1
 
         add_btn = QPushButton("Add Scan")
@@ -289,13 +355,31 @@ class NewScanDialog(QDialog):
             QMessageBox.critical(
                 self, "Can't determine source type",
                 f"Couldn't tell what kind of source this is from:\n{source}\n\n"
-                "Expected a .pcap, .osf, or .bag file, or a folder containing a "
-                "ROS2 bag (a metadata.yaml file alongside .db3 files).")
+                + _SOURCE_ERROR)
             return
 
         def done(scan_id):
+            if source_type == "ply":
+                QMessageBox.information(
+                    self, "Point cloud imported",
+                    "The point cloud is the output of Stage 1. The next stage is "
+                    "Stage 2 (Level).\n\n"
+                    + _import_text(self.project.data["scans"][scan_id]))
             self.accept()
             self.on_created(scan_id)
+
+        if source_type == "ply":
+            if core is None:
+                QMessageBox.critical(self, "Not available", "pipeline_core.py could not be imported.")
+                return
+            _run_blocking_task(
+                self, "Import point cloud",
+                "Adding the scan and importing the point cloud.\n"
+                "A large file can take some minutes.",
+                lambda: pm.add_scan_from_cloud(
+                    self.project, label, source, core.import_point_cloud),
+                done, watch_dir=Path(self.project.root) / "scans")
+            return
 
         _run_blocking_task(
             self, "Add scan",

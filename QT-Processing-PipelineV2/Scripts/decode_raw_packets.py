@@ -324,12 +324,19 @@ def iter_raw_packets(bag_path, topic, on_first_message=None):
             yield timestamp, parse_packet_msg_buf(rawdata)
 
 
-def build_pointcloud2_message(typestore, points_xyz, timestamp_ns, frame_id="os_sensor"):
+def build_pointcloud2_message(typestore, points_xyz, timestamp_ns, frame_id="os_sensor",
+                              point_times_ns=None):
     """Builds a sensor_msgs/msg/PointCloud2 message from an Nx3 float32
     array - x/y/z fields only, matching what slam_kiss_icp.py's own .ply
     writer already keeps (no intensity/reflectivity carried through, to
     keep this as close as possible to what the simplest downstream
-    reader - kiss-icp's rosbag dataloader - actually needs)."""
+    reader - kiss-icp's rosbag dataloader - actually needs).
+
+    point_times_ns (optional, update 23): N values (unsigned 32-bit, nanoseconds
+    from the first column of the scan). When given, the message gets a fourth
+    field 't' (UINT32, offset 12) like the field of the Ouster ROS driver.
+    KISS-ICP uses it for deskew (the correction of the motion during one
+    sweep). Without it (None) the message is the same as before: x, y, z only."""
     PointField = typestore.types["sensor_msgs/msg/PointField"]
     PointCloud2 = typestore.types["sensor_msgs/msg/PointCloud2"]
     Header = typestore.types["std_msgs/msg/Header"]
@@ -339,13 +346,28 @@ def build_pointcloud2_message(typestore, points_xyz, timestamp_ns, frame_id="os_
     nanosec = int(timestamp_ns % 1_000_000_000)
 
     FLOAT32 = 7  # sensor_msgs/msg/PointField.FLOAT32
+    UINT32 = 6   # sensor_msgs/msg/PointField.UINT32
     fields = [
         PointField(name="x", offset=0, datatype=FLOAT32, count=1),
         PointField(name="y", offset=4, datatype=FLOAT32, count=1),
         PointField(name="z", offset=8, datatype=FLOAT32, count=1),
     ]
-    point_step = 12
-    data = np.ascontiguousarray(points_xyz, dtype=np.float32).tobytes()
+    xyz32 = np.ascontiguousarray(points_xyz, dtype=np.float32)
+    if point_times_ns is None:
+        point_step = 12
+        data = xyz32.tobytes()
+    else:
+        times = np.asarray(point_times_ns, dtype=np.uint32).reshape(-1)
+        if len(times) != len(xyz32):
+            raise ValueError("point_times_ns must have one value for each point.")
+        fields.append(PointField(name="t", offset=12, datatype=UINT32, count=1))
+        point_step = 16
+        packed = np.zeros(len(xyz32), dtype=np.dtype(
+            {"names": ["x", "y", "z", "t"], "formats": ["<f4", "<f4", "<f4", "<u4"],
+             "offsets": [0, 4, 8, 12], "itemsize": 16}))
+        packed["x"], packed["y"], packed["z"] = xyz32[:, 0], xyz32[:, 1], xyz32[:, 2]
+        packed["t"] = times
+        data = packed.tobytes()
 
     return PointCloud2(
         header=Header(stamp=Time(sec=sec, nanosec=nanosec), frame_id=frame_id),
@@ -358,6 +380,34 @@ def build_pointcloud2_message(typestore, points_xyz, timestamp_ns, frame_id="os_
         data=np.frombuffer(data, dtype=np.uint8),
         is_dense=True,
     )
+
+
+def point_times_from_columns(column_times_ns, valid_mask):
+    """Time of each valid point, in nanoseconds from the first column of the scan.
+
+    column_times_ns: (W,) the time stamp of each column of the scan
+    (LidarScan.timestamp). valid_mask: (H, W) True for a point that is kept.
+    The order of the result is the order of valid_mask.ravel() (row after row),
+    the same order as the points that the caller keeps.
+
+    Returns (times, None) or (None, reason). A reason is returned when the
+    column times cannot be used: a kept point in a column with time stamp 0, or
+    a spread of more than 2**32 - 1 ns (about 4.29 s) in one scan.
+    """
+    column_times = np.asarray(column_times_ns).astype(np.int64).reshape(-1)
+    mask = np.asarray(valid_mask, dtype=bool)
+    if mask.ndim != 2 or mask.shape[1] != len(column_times):
+        return None, "the number of columns does not match the column times"
+    used = mask.any(axis=0)
+    if not used.any():
+        return None, "the scan has no valid points"
+    if (column_times[used] <= 0).any():
+        return None, "a column with points has the time stamp 0"
+    offset = column_times - column_times[used].min()
+    if offset[used].max() >= 2 ** 32:
+        return None, "the time spread of one scan is more than 4.29 s"
+    per_point = np.broadcast_to(offset, mask.shape)[mask]
+    return per_point.astype(np.uint32), None
 
 
 REQUIRED_CLIENT_NAMES = ("SensorInfo", "XYZLut", "ScanBatcher", "LidarPacket", "LidarScan")
@@ -560,10 +610,33 @@ def _build_lidar_packet(client, info, raw_array, packet_format, announce):
     )
 
 
+def scan_to_points(scan, xyz_lut, write_point_time=True):
+    """One batched scan -> (points, point_times, reason).
+
+    points: (N, 3) float32, the points that are not exactly (0, 0, 0), row after
+    row. point_times: (N,) uint32 ns from the first column, or None (with a
+    reason) when write_point_time is False or the column times cannot be used.
+    """
+    xyz_grid = xyz_lut(scan)
+    xyz = xyz_grid.reshape(-1, 3)
+    valid = ~np.all(xyz == 0, axis=1)
+    points = xyz[valid].astype(np.float32)
+    if not write_point_time:
+        return points, None, "switched off"
+    point_times, reason = point_times_from_columns(
+        scan.timestamp, valid.reshape(xyz_grid.shape[:2]))
+    return points, point_times, reason
+
+
 def decode_lidar_packets(input_path, output_path, lidar_topic, metadata_topic,
-                          points_topic, typestore):
+                          points_topic, typestore, write_point_time=True):
     """Does the actual packet -> scan -> PointCloud2 conversion. Returns
-    (n_scans, n_packets)."""
+    (n_scans, n_packets).
+
+    write_point_time (update 23): add the field 't' (time of each point, ns from
+    the first column of the scan) to every PointCloud2 message. Without this
+    field KISS-ICP runs WITHOUT deskew (slam_kiss_icp.py prints a warning).
+    False gives the old output (x, y, z only)."""
     client = _import_ouster_client()
     from rosbags.rosbag2 import Writer
 
@@ -594,6 +667,8 @@ def decode_lidar_packets(input_path, output_path, lidar_topic, metadata_topic,
     n_packets = 0
     n_skipped_wrong_size = 0
     size_warned = False
+    n_scans_with_time = 0
+    time_problem = None
 
     print(f"Decoding lidar packets from: {lidar_topic}")
     with Writer(output_path) as writer:
@@ -629,10 +704,14 @@ def decode_lidar_packets(input_path, output_path, lidar_topic, metadata_topic,
             packet = _build_lidar_packet(client, info, raw_array, packet_format,
                                           announce=(n_packets == 1))
             if _batch_packet(batcher, packet, scan):
-                xyz = xyz_lut(scan).reshape(-1, 3)
-                valid = ~np.all(xyz == 0, axis=1)
-                points = xyz[valid].astype(np.float32)
-                msg = build_pointcloud2_message(typestore, points, timestamp_ns)
+                points, point_times, reason = scan_to_points(scan, xyz_lut, write_point_time)
+                if write_point_time:
+                    if point_times is None:
+                        time_problem = time_problem or reason
+                    else:
+                        n_scans_with_time += 1
+                msg = build_pointcloud2_message(typestore, points, timestamp_ns,
+                                                point_times_ns=point_times)
                 writer.write(pc2_connection, timestamp_ns,
                              typestore.serialize_cdr(msg, pc2_msgtype))
                 n_scans += 1
@@ -641,6 +720,14 @@ def decode_lidar_packets(input_path, output_path, lidar_topic, metadata_topic,
 
     print(f"  {n_scans} scans decoded from {n_packets} lidar packets "
           f"({n_skipped_wrong_size} skipped for wrong size).")
+    if not write_point_time:
+        print("  No point time written (--no-point-time). KISS-ICP will run WITHOUT deskew.")
+    elif n_scans_with_time == n_scans:
+        print(f"  Point time written for every scan (field 't', ns from the first "
+              f"column). KISS-ICP can deskew.")
+    else:
+        print(f"  WARNING: point time written for {n_scans_with_time} of {n_scans} scans "
+              f"({time_problem}). KISS-ICP runs WITHOUT deskew for the other scans.")
     if n_skipped_wrong_size and n_scans == 0:
         print("  Every packet was skipped for wrong size, so nothing was decoded. The "
               "[debug] lines printed above (first raw message's hex + parsed frame_id) are "
@@ -677,6 +764,10 @@ def main():
     parser.add_argument("--points-topic", default="/ouster/points",
                          help="Topic name to write decoded points to in the output bag. "
                               "Default: /ouster/points")
+    parser.add_argument("--no-point-time", action="store_true",
+                         help="Do not write the time of each point (field 't'). The output "
+                              "then has x, y, z only (the old output), and KISS-ICP runs "
+                              "WITHOUT deskew. Default: the time is written.")
     args = parser.parse_args()
 
     try:
@@ -706,7 +797,7 @@ def main():
     try:
         n_scans, n_packets = decode_lidar_packets(
             str(input_path), str(output_path), args.lidar_topic, args.metadata_topic,
-            args.points_topic, typestore)
+            args.points_topic, typestore, write_point_time=not args.no_point_time)
     except Exception as e:
         print(f"ERROR: decoding failed: {type(e).__name__}: {e}")
         print("See this script's STATUS note in its own docstring for the likely causes "

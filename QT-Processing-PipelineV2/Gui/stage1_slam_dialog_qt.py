@@ -78,19 +78,44 @@ class Stage1SlamFieldsMixin:
         self.add_pipeline_label(pipeline)
 
         self.add_radio_choice("backend", "Backend:", [
-            ("Ouster CLI - reads raw sensor packets directly (pcap/OSF/rosbag) - "
-             "no decoding needed", "ouster"),
-            ("KISS-ICP - different algorithm entry point, reads already-decoded "
-             "PointCloud2 rosbag topics only - a source with only raw packets must "
-             "be decoded first (see 'Check Source for Raw Packets...' below)", "kiss_icp"),
-        ], default="kiss_icp", hint=("Both backends can point at the same source file for "
-                 "side-by-side comparison - just switch Backend and the output filename."))
+            ("KISS-ICP - reads PointCloud2 rosbag topics (Ouster or Hesai driver). "
+             "Raw Ouster packets must be decoded first (see 'Check Source for Raw "
+             "Packets...' below).", "kiss_icp"),
+            ("Ouster CLI - Ouster sensors only. Reads raw Ouster packets "
+             "(pcap/OSF/rosbag) directly. Cannot read a Hesai bag.", "ouster"),
+        ], default="kiss_icp")
+        self.add_help(
+            "backend",
+            "The program that builds the map from the recording.",
+            effects=[
+                ("KISS-ICP", "reads PointCloud2 topics from a rosbag. It works with an "
+                             "Ouster or a Hesai driver. Raw Ouster packets must be decoded "
+                             "first."),
+                ("Ouster CLI", "reads raw Ouster packets (pcap, OSF, rosbag) directly. No "
+                               "decoding is necessary. It works with Ouster sensors only."),
+            ],
+            when="Use KISS-ICP for a Hesai sensor or for a bag with decoded points. Use "
+                 "Ouster CLI for a .pcap or .osf file. To compare the two backends, give "
+                 "both the same source and a different output name.")
 
         self.add_file_or_folder_field(
             "source", "Source (pcap / OSF / .bag / ROS2 bag folder):",
             [("PCAP files", "*.pcap"), ("OSF files", "*.osf"), ("ROS bag files", "*.bag"),
              ("All files", "*.*")],
             on_picked=self._check_raw)
+        self.add_help(
+            "source",
+            "The recording that Stage 1 turns into a map. Both backends detect the type "
+            "from the file or folder.",
+            effects=[
+                ("File...", "select a .pcap, .osf or ROS1 .bag file."),
+                ("Folder...", "select a ROS2 bag folder (it holds a .db3 file and "
+                              "metadata.yaml). Stage 1 checks the folder for raw Ouster "
+                              "packets and offers to convert it."),
+            ],
+            when="Change it to map another recording. A ROS bag needs the 'rosbags' "
+                 "Python package with both backends. To repeat the raw-packet check, "
+                 "use 'Check Source for Raw Packets...'.")
         self.add_project_picker_button(
             "source", lambda: pm.list_eligible_inputs(self.pipeline, "slam"),
             extra_on_pick=self._check_raw)
@@ -100,23 +125,15 @@ class Stage1SlamFieldsMixin:
             lambda: self._check_raw(self.fields["source"].get(), interactive=True))
         self.form.addWidget(check_btn)
 
-        self.add_hint(
-            "Both backends auto-detect the type from what you give it. Use 'File...' "
-            "for a .pcap, .osf, or ROS1 .bag - use 'Folder...' for a ROS2 bag (a folder "
-            "containing .db3 + metadata.yaml). Picking a ROS2 bag folder automatically "
-            "checks it for raw Ouster packets and offers to convert it. ROS bag reading "
-            "needs the 'rosbags' Python package for either backend.")
-
-        self.add_file_field("meta", "Meta JSON file (optional for rosbag sources):",
-                             [("JSON files", "*.json"), ("All files", "*.*")])
-        self.add_hint("[Ouster CLI] Required for a .pcap source, optional for rosbag "
-                       "(resolved from the bag if left blank). [KISS-ICP] Only used with "
-                       "the 'ouster' dataloader (.pcap sources).")
-
         output_default = self.resolve_project_output_default(pipeline, "slam", ".ply")
         self.add_save_field("output", "Output .ply:", default_ext=".ply", default=output_default)
         self.register_auto_default(
             "output", lambda p: self.resolve_project_output_default(p, "slam", ".ply"))
+        self.add_help(
+            "output",
+            "The file that Stage 1 writes. It holds the map.",
+            when="Change it to save under another name. In project mode the name comes "
+                 "from the pipeline.")
 
         # 'Map max range' is not here any more: it sits with the other range
         # limits inside each Backend's own section (see BackendMirroredRef).
@@ -125,6 +142,18 @@ class Stage1SlamFieldsMixin:
         # begin_section()/end_section() + grid_remove()/grid() in the
         # Tkinter version, using show()/hide() instead.
         self.ouster_section = self.begin_section()
+        # Update 28: the Meta JSON file is a Basic field for Ouster CLI (a .pcap
+        # needs it) and an Advanced field for KISS-ICP (see below). One value,
+        # two boxes: fields["meta"] reads the box of the selected Backend.
+        ouster_meta_edit = self.add_file_field(
+            "meta_ouster", "Meta JSON file (optional for rosbag sources):",
+            [("JSON files", "*.json"), ("All files", "*.*")])
+        self.add_help(
+            ouster_meta_edit,
+            "The sensor metadata file (.json) of the recording.",
+            when="The source is a .pcap file: it needs this file. A rosbag source does "
+                 "not need it. Stage 1 reads the metadata from the bag when the box is "
+                 "empty.")
         self.add_preset_selector("Voxel size preset:", [
             ("Fine (15 cm) - slower, most detail", {"voxel_size": "0.15"}),
             ("Medium (25 cm) - balanced, good default", {"voxel_size": "0.25"}),
@@ -133,43 +162,115 @@ class Stage1SlamFieldsMixin:
         # Preset values stay in METRES - LengthFieldRef.set() shows them in cm.
         self.add_length_field("voxel_size", "Voxel size (cm):", default_m="0.25",
                               min_cm=1, max_cm=300)
-        self.add_hint("Smaller = more detail but slower and larger output files. Start "
-                       "with Medium unless you have a specific reason to change it.")
+        self.add_help(
+            "voxel_size",
+            "The size of the grid cell that SLAM uses to thin the points. One point stays "
+            "in each cell.",
+            effects=[
+                ("Smaller (15 cm)", "more detail. The run is slower and the output file "
+                                    "is larger."),
+                ("Larger (50 cm)", "the run is faster. The map has less detail."),
+            ],
+            when="The map is too coarse, or the run is too slow. Medium (25 cm) is the "
+                 "normal value.")
+        # Settings that normally stay at their default values (closed block).
+        self.ouster_advanced = self.begin_advanced("Advanced")
         ouster_range_edit = self.add_text_field("_ouster_map_max_range",
                                                 "Map max range (m, optional):")
         del self.fields["_ouster_map_max_range"]   # reached through fields["map_max_range"]
-        self.add_hint(
-            "Optional. Use this value to remove far noise, for example in open areas. "
-            "The saved map does not include points that are farther than this distance "
-            "from the sensor (ouster-cli 'clip' after 'slam'). SLAM registration still "
-            "uses the full sensor range. Set a value a little larger than the distance "
-            "from the robot path to the farthest surface that you must keep. Leave blank "
-            "to keep all points. This backend has no separate horizontal and vertical "
-            "limits.")
+        self.add_help(
+            ouster_range_edit,
+            "Removes far points from the saved map. The map does not include points that "
+            "are farther than this distance from the sensor (the ouster-cli 'clip' step "
+            "after 'slam'). SLAM registration still uses the full sensor range.",
+            effects=[
+                ("Smaller", "more far noise is removed. Surfaces behind the limit are "
+                            "also removed."),
+                ("Larger or empty", "more points stay in the map. Empty keeps all points."),
+            ],
+            when="Far noise shows in the map, for example in an open area. Use a value a "
+                 "little larger than the distance from the robot path to the farthest "
+                 "surface that you must keep.",
+            note="This backend has no separate horizontal and vertical limits.")
         self.add_checkbox("visualize", "Open visualizer after processing")
+        self.add_help(
+            "visualize",
+            "Opens the Ouster visualizer when the processing ends.",
+            effects=[
+                ("On", "a viewer window shows the result."),
+                ("Off", "no window opens."),
+            ],
+            when="You want to look at the map directly after the run.")
+        self.end_advanced()
         self.end_section()
 
         self.kiss_section = self.begin_section()
-        self.add_file_field("kiss_icp_script", "Script (.py):", [("Python files", "*.py")],
-                             default=str(SCRIPTS_DIR / "slam_kiss_icp.py"))
         bundled_config = CONFIGS_DIR / "kiss_icp_config_indoor.yaml"
+        hesai_config = CONFIGS_DIR / "kiss_icp_config_hesai.yaml"
+        sensor_presets = [("Keep the Config field as it is", {})]
+        if bundled_config.exists():
+            sensor_presets.append(("Ouster OS0-128 - kiss_icp_config_indoor.yaml",
+                                   {"kiss_icp_config": str(bundled_config)}))
+        if hesai_config.exists():
+            sensor_presets.append(("Hesai XT32 - kiss_icp_config_hesai.yaml (not tuned)",
+                                   {"kiss_icp_config": str(hesai_config)}))
+        if len(sensor_presets) > 1:
+            self.sensor_preset_combo = self.add_preset_selector(
+                "Sensor preset:", sensor_presets)
+        # Settings that normally stay at their default values (closed block).
+        # Update 28: the Config .yaml path and the Meta JSON file are inside.
+        self.kiss_advanced = self.begin_advanced("Advanced")
+        kiss_meta_edit = self.add_file_field(
+            "meta_kiss", "Meta JSON file (optional):",
+            [("JSON files", "*.json"), ("All files", "*.*")])
+        self.add_help(
+            kiss_meta_edit,
+            "The sensor metadata file (.json) of the recording.",
+            when="The source is a .pcap file (the 'ouster' dataloader). A rosbag source "
+                 "does not need it.")
         config_edit = self.add_file_field(
             "kiss_icp_config", "Config .yaml (recommended):",
             [("YAML files", "*.yaml *.yml"), ("All files", "*.*")],
             default=str(bundled_config) if bundled_config.exists() else "")
-        self.add_hint("STRONGLY recommended for indoor/compartment use. Without a config, "
-                       "kiss-icp's defaults assume vehicle-scale outdoor odometry - "
-                       "confirmed to under-populate an indoor map by roughly 190x on a "
-                       "real capture. Defaults to the bundled kiss_icp_config_indoor.yaml "
-                       "if it sits next to this script.")
+        self.add_help(
+            config_edit,
+            "The KISS-ICP settings file (.yaml). It sets the voxel size, the ranges and "
+            "other SLAM values. The Sensor preset puts the file for the sensor in this "
+            "box.",
+            effects=[
+                ("With a config", "KISS-ICP uses the values for an indoor map. The "
+                                  "bundled kiss_icp_config_indoor.yaml is the default."),
+                ("Without a config", "KISS-ICP uses defaults for an outdoor vehicle. In a "
+                                     "compartment the map then has far fewer points."),
+            ],
+            when="Use another file for another sensor, or for your own tuned values. The "
+                 "Hesai config changes one value of the Ouster config (min_range 0.1). Its "
+                 "other values are not tuned for Hesai.",
+            note="Keep this box filled for a map of a compartment.")
 
+        self.add_file_field("kiss_icp_script", "Script (.py):", [("Python files", "*.py")],
+                             default=str(SCRIPTS_DIR / "slam_kiss_icp.py"))
+        self.add_help(
+            "kiss_icp_script",
+            "The Python script that runs KISS-ICP.",
+            when="Change it only to use a changed copy of the script.")
         self.kiss_voxel_size_label = QLabel()
         self.kiss_voxel_size_label.setWordWrap(True)
         self.form.addWidget(self.kiss_voxel_size_label)
         self.add_length_field("kiss_icp_voxel_size", "Voxel size override (cm, optional):",
                               min_cm=0.5, max_cm=100)
-        self.add_hint("Leave blank to use the config's own voxel_size, or kiss-icp's "
-                       "built-in default if no config is given.")
+        self.add_help(
+            "kiss_icp_voxel_size",
+            "Replaces the voxel size of the config for this run. The voxel is the grid "
+            "cell that SLAM uses to thin the points.",
+            effects=[
+                ("Smaller", "more detail. The run is slower and the output file is "
+                            "larger."),
+                ("Larger", "the run is faster. The map has less detail."),
+            ],
+            when="The map is too coarse, or the run is too slow. Leave the box empty to "
+                 "use the voxel size of the config (shown above the box), or the KISS-ICP "
+                 "default if there is no config.")
 
         range_heading = QLabel("Range limits")
         range_heading.setStyleSheet("font-weight: bold; margin-top: 6px;")
@@ -179,48 +280,107 @@ class Stage1SlamFieldsMixin:
         self.kiss_min_range_label.setWordWrap(True)
         self.form.addWidget(self.kiss_min_range_label)
         self.add_text_field("kiss_icp_min_range", "Min range override (m, optional):")
-        self.add_hint("Crops points closer than this before SLAM runs. Useful when the "
-                       "sensor sees part of its own mount hardware - shows up as a dense, "
-                       "unmoving blob that can confuse the solver. Leave blank to use the "
-                       "config's own value, or 0.0/no cropping if the config doesn't set "
-                       "one either. Start small (0.2-0.3m) and raise only as needed.")
+        self.add_help(
+            "kiss_icp_min_range",
+            "Removes points that are closer to the sensor than this distance, before SLAM "
+            "runs.",
+            effects=[
+                ("Smaller", "more near points stay. Parts of the sensor mount can stay in "
+                            "the data."),
+                ("Larger", "more near points are removed. Real surfaces near the sensor "
+                           "are also removed."),
+            ],
+            when="The sensor sees part of its own mount. It shows as a dense blob that "
+                 "does not move, and it can confuse SLAM. Start with 0.2-0.3 m and raise "
+                 "the value only as needed. Leave the box empty to use the value of the "
+                 "config, or no crop if the config has none.")
 
         self.kiss_max_range_label = QLabel()
         self.kiss_max_range_label.setWordWrap(True)
         self.form.addWidget(self.kiss_max_range_label)
         kiss_range_edit = self.add_text_field("map_max_range", "Map max range (m, optional):")
-        self.add_hint(
-            "Optional. When you enter a value, it replaces the config's own max_range "
-            "(shown above this field) for this run. SLAM registration uses this range, and "
-            "the saved map does not include points that are farther than this distance from "
-            "the sensor. The distance is measured from the sensor position of each scan, "
-            "along the whole path. It is not measured from the start. A smaller value can "
-            "remove far noise, but SLAM then has less of the room to match. Leave this field "
-            "blank to use the config's own max_range. The saved map holds every scan, also "
-            "with a closed loop path. For more control of the saved map only, use the "
-            "horizontal and vertical limits below.")
+        self.add_help(
+            kiss_range_edit,
+            "Replaces the max_range of the config (shown above the box) for this run. SLAM "
+            "registration uses this range. The saved map does not include points that are "
+            "farther than this distance from the sensor. The distance is measured from "
+            "the sensor position of each scan along the whole path, not from the start.",
+            effects=[
+                ("Smaller", "far noise is removed. SLAM has less of the room to match."),
+                ("Larger", "SLAM matches more of the room. Far noise stays."),
+            ],
+            when="Far noise shows in the map. Leave the box empty to use the max_range of "
+                 "the config. For more control of the saved map only, use the horizontal "
+                 "and vertical limits below.")
 
         self.add_text_field("kiss_icp_map_max_horizontal",
                             "Map max horizontal distance (m, optional):")
+        self.add_help(
+            "kiss_icp_map_max_horizontal",
+            "The saved map does not include points that are farther than this distance "
+            "from the sensor along the floor. KISS-ICP only.",
+            effects=[
+                ("Smaller", "more far points are removed."),
+                ("Larger or empty", "more far points stay."),
+            ],
+            when="Far noise shows in an open area, and you must keep a high ceiling.",
+            note="A point must be inside all the limits that you set, also 'Map max range'.")
         self.add_text_field("kiss_icp_map_max_vertical",
                             "Map max vertical distance (m, optional):")
-        self.add_hint(
-            "Optional. KISS-ICP only. The saved map does not include points that are "
-            "farther than these distances from the sensor. The horizontal distance is "
-            "along the floor. The vertical distance is up or down. Use a horizontal limit "
-            "to remove far noise in an open area and keep a high ceiling. Use a vertical "
-            "limit to remove points far above or below the sensor. 'Vertical' is the up "
-            "direction of the sensor at the start of the scan. A point must be in all of "
-            "the limits that you set, including 'Map max range'.")
+        self.add_help(
+            "kiss_icp_map_max_vertical",
+            "The saved map does not include points that are farther than this distance "
+            "from the sensor up or down. 'Vertical' is the up direction of the sensor at "
+            "the start of the scan. KISS-ICP only.",
+            effects=[
+                ("Smaller", "more points far above or below the sensor are removed."),
+                ("Larger or empty", "more points stay."),
+            ],
+            when="Points far above or below the sensor must go from the map.",
+            note="A point must be inside all the limits that you set, also 'Map max range'.")
 
         self.add_text_field("kiss_icp_dataloader", "Force dataloader (optional):")
+        self.add_help(
+            "kiss_icp_dataloader",
+            "The KISS-ICP reader for the type of the source.",
+            when="Stage 1 reads the wrong type. Leave the box empty to detect the type "
+                 "from the source.")
         self.add_text_field("kiss_icp_topic", "Rosbag topic (optional):")
-        self.add_hint("Dataloader: leave blank to auto-detect from the source. Topic: "
-                       "only needed if a rosbag has more than one PointCloud2 topic.")
+        self.add_help(
+            "kiss_icp_topic",
+            "The name of the PointCloud2 topic to read from the rosbag.",
+            when="The bag has more than one PointCloud2 topic. Leave the box empty when "
+                 "the bag has one.")
+
+        self.add_checkbox("kiss_icp_flying_pixel_filter",
+                          "Remove flying pixels before SLAM", default=False)
+        self.add_help(
+            "kiss_icp_flying_pixel_filter",
+            "A flying pixel is a false point in the air between a near surface and a far "
+            "surface. The filter removes a point when its range is very different from "
+            "the range of both of its neighbours in the scan.",
+            effects=[
+                ("On", "the filter removes flying pixels before SLAM."),
+                ("Off", "all points go to SLAM."),
+            ],
+            when="The map has false points at the edges of near objects.",
+            note="The filter needs the scan in row order with a time value for each point, "
+                 "as the Ouster sensor gives it. A scan from a Hesai sensor, from the "
+                 "simulator, or with no time value is not filtered, and the run output "
+                 "says so. To check the effect, make one map with the option and one "
+                 "without it, and compare them in CloudCompare.")
+        self.end_advanced()
         self.end_section()
 
+        self.fields["meta"] = BackendMirroredRef(
+            kiss_meta_edit, ouster_meta_edit, lambda: self.fields["backend"].get())
         self.fields["map_max_range"] = BackendMirroredRef(
             kiss_range_edit, ouster_range_edit, lambda: self.fields["backend"].get())
+        # The mirrored field belongs to both Advanced blocks (counted for the
+        # block of the selected Backend).
+        for advanced_info in (self.ouster_advanced, self.kiss_advanced):
+            advanced_info["keys"].append("map_max_range")
+            self.reset_advanced_baseline(advanced_info)
 
         config_edit.textChanged.connect(self._update_kiss_icp_config_labels)
         self._update_kiss_icp_config_labels()  # populate for the bundled-config default
@@ -364,12 +524,38 @@ class Stage1SlamFieldsMixin:
         about that exact regression class in the real Tkinter app."""
         output_bag = Path(path).parent / f"{Path(path).name}_decoded"
         if output_bag.exists():
-            self._apply_decoded_source(output_bag)
-            QMessageBox.information(
-                self, "Already converted",
-                f"A decoded bag already exists at:\n{output_bag}\n\n"
-                "Source has been updated to use it.")
-            return
+            # Update 26: a decoded bag from before update 26 has no point time,
+            # so KISS-ICP would run without deskew. Offer to convert again.
+            # The old folder is renamed, never deleted.
+            if core.decoded_bag_has_point_time(output_bag) is False:
+                old_name = self._unused_sibling_name(output_bag, "_no_time")
+                answer = QMessageBox.question(
+                    self, "Decoded bag has no point time",
+                    f"A decoded bag already exists at:\n{output_bag}\n\n"
+                    "This bag has no time for each point. It was made with an older version of the converter. "
+                    "With this bag, KISS-ICP runs without deskew. When the robot moves or "
+                    "turns, the walls in the map can be skewed.\n\n"
+                    "Convert the raw bag again?\n"
+                    f"Yes: the old decoded bag is renamed to:\n{old_name}\n"
+                    "(it is not deleted), and the conversion starts.\n"
+                    "No: use the existing decoded bag.",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                if answer == QMessageBox.Yes:
+                    try:
+                        output_bag.rename(old_name)
+                    except OSError as e:
+                        QMessageBox.critical(
+                            self, "Cannot rename the old decoded bag",
+                            f"The old decoded bag was not changed.\n\n{e}")
+                        return
+                    self._report_output(f"Renamed the old decoded bag to: {old_name}")
+            if output_bag.exists():
+                self._apply_decoded_source(output_bag)
+                QMessageBox.information(
+                    self, "Already converted",
+                    f"A decoded bag already exists at:\n{output_bag}\n\n"
+                    "Source has been updated to use it.")
+                return
 
         script = SCRIPTS_DIR / "decode_raw_packets.py"
         if not script.exists():
@@ -406,6 +592,17 @@ class Stage1SlamFieldsMixin:
         # this, the decode ran with no "running" status, so another Run
         # could start on the same bag while it was still being written.
         self._run_utility_command(cmd, on_decode_complete)
+
+    @staticmethod
+    def _unused_sibling_name(path, suffix):
+        """<path><suffix>, or <path><suffix>_2, _3, ... - the first name that is free."""
+        path = Path(path)
+        candidate = path.with_name(path.name + suffix)
+        number = 2
+        while candidate.exists():
+            candidate = path.with_name(f"{path.name}{suffix}_{number}")
+            number += 1
+        return candidate
 
     def _optional_positive_meters(self, key, name):
         """Blank -> None. Otherwise a number > 0 in metres, or ValueError."""
@@ -480,6 +677,10 @@ class Stage1SlamFieldsMixin:
         the real-execution path instead of falling back to the stub."""
         backend = self.fields["backend"].get()
         source = self.require_existing_file("source", "Source")
+        if backend == "ouster" and core is not None:
+            can_read, reason = core.ouster_cli_can_read(source)
+            if not can_read:
+                raise ValueError(reason)
         meta = self.fields["meta"].get().strip() or None
         output = self.require("output", "Output .ply")
         active_pipeline = self.get_active_pipeline_for_run()
@@ -530,11 +731,13 @@ class Stage1SlamFieldsMixin:
                 "kiss_icp_map_max_horizontal", "Map max horizontal distance")
             map_max_vertical = self._optional_positive_meters(
                 "kiss_icp_map_max_vertical", "Map max vertical distance")
+            flying_pixel_filter = bool(self.fields["kiss_icp_flying_pixel_filter"].get())
             cmd = core.build_kiss_icp_slam_command(
                 script, source, output, config=config, dataloader=dataloader,
                 topic=topic, meta=meta, voxel_size=kiss_voxel_size, min_range=kiss_min_range,
                 map_max_range=map_max_range, map_max_horizontal=map_max_horizontal,
-                map_max_vertical=map_max_vertical, pipeline=active_pipeline)
+                map_max_vertical=map_max_vertical, pipeline=active_pipeline,
+                flying_pixel_filter=flying_pixel_filter)
 
             effective_voxel_size = (kiss_voxel_size if kiss_voxel_size is not None
                                      else core.read_kiss_icp_voxel_size(config))
@@ -563,6 +766,9 @@ class Stage1SlamFieldsMixin:
                    if map_max_horizontal is not None else "")
                 + (f"Map max vertical distance: {map_max_vertical} m (saved map only)\n"
                    if map_max_vertical is not None else "")
+                + ("Flying-pixel filter: on (see the run output for the number of points "
+                   "removed, and for the frames that could not be filtered)\n"
+                   if flying_pixel_filter else "")
                 + f"Saved to: {output}\n\n"
                 "=== NOTE ===\n"
                 "Check the tool output above for the actual point count - if it's in the "
@@ -594,9 +800,9 @@ class Stage1SlamFieldsMixin:
             + map_max_range_line
             + f"Visualizer: {'opened' if visualize else 'not opened'}\n\n"
             + ("=== NOTE ===\n"
-               "Map max range with the Ouster CLI backend (ouster-cli 'clip' after "
-               "'slam') is not yet checked on real data. Look at the map in CloudCompare "
-               "and make sure that the far points are gone.\n\n"
+               "Map max range with the Ouster CLI backend uses ouster-cli 'clip' after "
+               "'slam'. Look at the map in CloudCompare and make sure that the far "
+               "points are gone.\n\n"
                if map_max_range is not None else "")
             + "=== NEXT STEPS ===\n"
             "Open it in CloudCompare to check map quality, "

@@ -66,7 +66,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QCheckBox, QRadioButton, QButtonGroup, QComboBox, QWidget, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QTreeWidget, QTreeWidgetItem,
-    QGroupBox,
+    QGroupBox, QToolButton, QFrame,
 )
 
 try:
@@ -100,6 +100,55 @@ def _same_value(a, b):
     if fa is not None and fb is not None:
         return abs(fa - fb) <= 1e-12 * max(1.0, abs(fa), abs(fb))
     return str(a).strip() == str(b).strip()
+
+
+class _FieldsDict(dict):
+    """self.fields. Tells the page when a field is added (update 28), so the
+    page can connect the preset drop-downs and the green mark to the field
+    even when the field is built after the drop-down."""
+
+    def __init__(self, owner):
+        super().__init__()
+        self._owner = owner
+
+    def __setitem__(self, key, ref):
+        super().__setitem__(key, ref)
+        try:
+            self._owner._field_registered(key, ref)
+        except Exception:
+            pass
+
+
+_AUTO_FILL_STYLE = "QLineEdit { background-color: #d8f3d8; color: #000000; }"
+
+
+def project_input_default(pipeline, stage_name):
+    """Update 28. The input file of `stage_name` that the project records for
+    `pipeline` (the output of the stage before it), or "" when there is none.
+    Never raises. A page registers it with register_auto_default() so that a
+    pipeline switch changes the Input box."""
+    if pm is None or pipeline is None:
+        return ""
+    try:
+        return str(pm.get_input_for_stage(pipeline, stage_name))
+    except Exception:
+        return ""
+
+
+def diff_input_default(pipeline, side):
+    """Update 28. side 'reference' or 'comparison': the Stage 5 input file that
+    the project records for this diff pipeline, or "" (never raises)."""
+    if pm is None or pipeline is None or getattr(pipeline, "kind", None) != "diff":
+        return ""
+    try:
+        return str(pm.get_diff_inputs(pipeline)[f"{side}_path"])
+    except Exception:
+        return ""
+
+
+def _looks_like_path(text):
+    text = str(text).strip()
+    return bool(text) and ("/" in text or "\\" in text)
 
 
 def _tick_pixmap(size=48, device_pixel_ratio=1.0):
@@ -243,7 +292,7 @@ class ProjectFilePicker(QDialog):
     there is nothing to pick there (enforced via each leaf's
     Qt.UserRole data - header rows carry none)."""
 
-    def __init__(self, parent, project, groups, on_pick):
+    def __init__(self, parent, project, groups, on_pick, empty_text=None):
         super().__init__(parent)
         self.setWindowTitle("Choose a Project File")
         self.resize(640, 420)
@@ -253,7 +302,8 @@ class ProjectFilePicker(QDialog):
         layout = QVBoxLayout(self)
 
         if not groups:
-            label = QLabel("No eligible files yet - run an earlier stage first.")
+            label = QLabel(empty_text or
+                           "No eligible files yet - run an earlier stage first.")
             label.setWordWrap(True)
             layout.addWidget(label)
             close_btn = QPushButton("Close")
@@ -539,6 +589,103 @@ class RadioGroupRef:
 # _build_*_fields() runs.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Update 29: the "?" help button. A small round button at the end of a field
+# row. A click opens a popup with the explanation of the field in three parts:
+# what it does, what the options do to the data, and when to change it.
+# ---------------------------------------------------------------------------
+
+HELP_POPUP_WIDTH = 420
+_HELP_BUTTON_STYLE = (
+    "QToolButton { border: 1px solid #888888; border-radius: 10px; background: #f0f0f0;"
+    " color: #000000; font-weight: bold; }"
+    "QToolButton:hover { background: #ffffdc; }")
+_HELP_POPUP_STYLE = (
+    "QFrame#helpPopup { background: #ffffdc; border: 1px solid #767676; }"
+    "QLabel { background: transparent; color: #000000; font-size: 9pt; }")
+
+
+def help_html(what, effects=None, when=None, note=None):
+    """The rich text of a help popup. what: one sentence. effects: a list of
+    (label, text) pairs, for example ("Smaller (1-2 cm)", "strict ..."). when:
+    one sentence for 'Change it when'. note: an optional last line."""
+    from html import escape
+    parts = [f"<b>What it does:</b> {escape(what)}"]
+    for label, text in (effects or []):
+        parts.append(f"<b>{escape(label)}:</b> {escape(text)}")
+    if when:
+        parts.append(f"<b>Change it when:</b> {escape(when)}")
+    if note:
+        parts.append(f"<i>{escape(note)}</i>")
+    return "<br>".join(parts)
+
+
+class HelpButton(QToolButton):
+    """The "?" button. Click: show the popup under the button."""
+
+    def __init__(self, html, parent=None):
+        super().__init__(parent)
+        self.help_html = html
+        self.setText("?")
+        self.setFixedSize(20, 20)
+        self.setStyleSheet(_HELP_BUTTON_STYLE)
+        self.setToolTip("Click for an explanation")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.popup = None
+        self.clicked.connect(self.show_popup)
+
+    def show_popup(self):
+        if self.popup is None:
+            popup = QFrame(self.window(), Qt.Popup)
+            popup.setObjectName("helpPopup")
+            popup.setStyleSheet(_HELP_POPUP_STYLE)
+            layout = QVBoxLayout(popup)
+            layout.setContentsMargins(8, 6, 8, 6)
+            label = QLabel(self.help_html)
+            label.setTextFormat(Qt.RichText)
+            label.setWordWrap(True)
+            label.setFixedWidth(HELP_POPUP_WIDTH)
+            layout.addWidget(label)
+            self.popup = popup
+        self.popup.adjustSize()
+        # Under the button, right edges level; keep the popup on the screen.
+        point = self.mapToGlobal(self.rect().bottomRight())
+        x = point.x() - self.popup.width()
+        y = point.y() + 2
+        screen = self.screen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            x = max(area.left(), min(x, area.right() - self.popup.width()))
+            if y + self.popup.height() > area.bottom():
+                y = self.mapToGlobal(self.rect().topRight()).y() - self.popup.height() - 2
+        self.popup.move(x, y)
+        self.popup.show()
+
+
+def _find_row_layout(layout, widget):
+    """The layout (a row) that holds widget directly. Looks into nested
+    layouts and into the layouts of child widgets (a toggle row, an Advanced
+    block). None when widget is in no layout under `layout`."""
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        sub = item.layout()
+        if sub is not None:
+            if sub.indexOf(widget) >= 0:
+                return sub
+            found = _find_row_layout(sub, widget)
+            if found is not None:
+                return found
+        child = item.widget()
+        if child is not None and child is not widget and child.layout() is not None:
+            if child.layout().indexOf(widget) >= 0:
+                return child.layout()
+            found = _find_row_layout(child.layout(), widget)
+            if found is not None:
+                return found
+    return None
+
+
 class StageFieldsMixin:
 
     # -- layout -------------------------------------------------------------
@@ -555,6 +702,142 @@ class StageFieldsMixin:
 
     def end_section(self):
         self.form = self._layout_stack.pop()
+
+    # -- Basic / Advanced view -----------------------------------------------
+    #
+    # begin_advanced() ... end_advanced() wraps the settings that normally
+    # stay at their default values. The block is CLOSED when the page opens.
+    # A closed block only hides the widgets: every field keeps its key in
+    # self.fields and keeps its value, so _build_run() reads a hidden field
+    # exactly like a shown one. The header shows how many fields in the
+    # block differ from the value they had when the block was built, so a
+    # changed setting is never hidden without a sign.
+
+    def begin_advanced(self, title="Advanced"):
+        if not hasattr(self, "_advanced_sections"):
+            self._advanced_sections = []
+        box = QWidget()
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(0, 8, 0, 0)
+        box_layout.setSpacing(4)
+        header = QToolButton()
+        header.setCheckable(True)
+        header.setChecked(False)
+        header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        header.setArrowType(Qt.RightArrow)
+        header.setAutoRaise(True)
+        header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        header.setStyleSheet("QToolButton { font-weight: bold; text-align: left; }")
+        body = QWidget()
+        body.setVisible(False)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(16, 0, 0, 0)
+        body_layout.setSpacing(4)
+        box_layout.addWidget(header)
+        box_layout.addWidget(body)
+        self.form.addWidget(box)
+        info = {
+            "box": box, "header": header, "body": body, "title": title,
+            "keys_before": set(self.fields.keys()), "keys": [], "baseline": {},
+        }
+        header.toggled.connect(lambda checked, i=info: self._set_advanced_open(i, checked))
+        self._advanced_sections.append(info)
+        self._layout_stack.append(self.form)
+        self.form = body_layout
+        self._advanced_open_info = info
+        return info
+
+    def end_advanced(self):
+        info = self._advanced_open_info
+        self.form = self._layout_stack.pop()
+        info["keys"] = [k for k in self.fields.keys() if k not in info["keys_before"]]
+        self.reset_advanced_baseline(info)
+        body = info["body"]
+        for cls, signal in ((QLineEdit, "textChanged"), (QCheckBox, "toggled"),
+                            (QRadioButton, "toggled"), (QComboBox, "currentIndexChanged")):
+            for widget in body.findChildren(cls):
+                getattr(widget, signal).connect(
+                    lambda *_a, i=info: self._refresh_advanced_header(i))
+        self._refresh_advanced_header(info)
+        return info
+
+    def keep_field_order(self, *keys):
+        """Put these keys first in self.fields, in this order. A field that
+        moved into an Advanced block is built later than before. The order of
+        self.fields is part of the page contract (script, input, output
+        first), so a page calls this at the end of its builder."""
+        first = {k: self.fields[k] for k in keys if k in self.fields}
+        rest = {k: v for k, v in self.fields.items() if k not in first}
+        self.fields.clear()
+        self.fields.update(first)
+        self.fields.update(rest)
+
+    def reset_advanced_baseline(self, info=None):
+        """Take the current values as the 'default' for the changed count.
+        Without an argument, do it for every Advanced block."""
+        for item in ([info] if info is not None else getattr(self, "_advanced_sections", [])):
+            item["baseline"] = {}
+            for key in item["keys"]:
+                try:
+                    item["baseline"][key] = self.fields[key].get()
+                except Exception:
+                    pass
+            self._refresh_advanced_header(item)
+
+    def _rebase_advanced_key(self, key):
+        """A value that the page filled in by itself (an automatic default) is
+        not a change by the user: take it as the new default of its block."""
+        for info in getattr(self, "_advanced_sections", []):
+            if key in info["baseline"]:
+                try:
+                    info["baseline"][key] = self.fields[key].get()
+                except Exception:
+                    continue
+                self._refresh_advanced_header(info)
+
+    def advanced_changed_count(self, info):
+        count = 0
+        for key, old in info["baseline"].items():
+            try:
+                new = self.fields[key].get()
+            except Exception:
+                continue
+            if isinstance(old, str) or isinstance(new, str):
+                if not _same_value(old, new):
+                    count += 1
+            elif new != old:
+                count += 1
+        return count
+
+    def _refresh_advanced_header(self, info):
+        count = self.advanced_changed_count(info)
+        text = info["title"]
+        if count:
+            text += f"  ({count} changed from default)"
+        info["header"].setText(text)
+
+    def _set_advanced_open(self, info, is_open):
+        info["body"].setVisible(is_open)
+        info["header"].setArrowType(Qt.DownArrow if is_open else Qt.RightArrow)
+        if info["header"].isChecked() != is_open:
+            info["header"].setChecked(is_open)
+
+    def open_advanced(self, open_all=True):
+        for info in getattr(self, "_advanced_sections", []):
+            self._set_advanced_open(info, bool(open_all))
+
+    def _reveal_advanced_for_error(self, message):
+        """Open each closed Advanced block whose field labels appear in an
+        error message, so the user can see the field that was refused."""
+        text = str(message).lower()
+        for info in getattr(self, "_advanced_sections", []):
+            if info["header"].isChecked():
+                continue
+            for label in info["body"].findChildren(QLabel):
+                name = label.text().strip().rstrip(":").lower()
+                if len(name) > 3 and name in text:
+                    self._set_advanced_open(info, True)
+                    break
 
     def begin_columns(self, titles):
         """Starts len(titles) side-by-side QGroupBox columns (a
@@ -779,28 +1062,163 @@ class StageFieldsMixin:
         label.setStyleSheet("color: #777777; font-size: 8pt;")
         self.form.addWidget(label)
 
+    def add_help(self, target, what, effects=None, when=None, note=None):
+        """Adds a "?" help button at the end of the row of a field.
+        target: a field key (the row of that field), or a widget in the row.
+        what / effects / when / note: see help_html(). Returns the button."""
+        widget = target
+        if isinstance(target, str):
+            row = getattr(self, "_help_rows", {}).get(target)
+            if row is None:
+                ref = self.fields[target]
+                widget = getattr(ref, "widget", None)
+                if widget is None:
+                    raise ValueError(f"add_help: no row for the field {target!r}")
+        else:
+            row = None
+        if row is None:
+            row = _find_row_layout(self.form_root_layout(), widget)
+        if row is None or not isinstance(row, QHBoxLayout):
+            raise ValueError("add_help: the widget is not in a row of a field")
+        button = HelpButton(help_html(what, effects, when, note))
+        row.addWidget(button, 0, Qt.AlignTop)
+        if not hasattr(self, "_help_buttons"):
+            self._help_buttons = []
+        self._help_buttons.append(button)
+        return button
+
+    def form_root_layout(self):
+        """The top layout of the page (self.form can be the layout of an
+        open Advanced block while the page is built)."""
+        root = self._layout_stack[0] if getattr(self, "_layout_stack", None) else self.form
+        return root
+
     def add_preset_selector(self, label, presets, hint=None):
+        """A drop-down of presets. Each preset is (text, {field_key: value}) or,
+        for a preset whose value comes from the selected pipeline (update 28),
+        (text, {}, resolver): resolver(pipeline) -> (text, {field_key: value}).
+        The page calls the resolver again on every pipeline switch, so the text
+        and the value follow the pipeline. A resolver that gives no values
+        (the pipeline does not know the value) gives a preset that matches
+        nothing and writes nothing.
+
+        Update 28: the drop-down follows the fields. It shows the preset whose
+        values all equal the values in the boxes, and 'Custom' when no preset
+        does (a box that you edit, or a value that a page fills in). A preset
+        with no values and no resolver ('Keep the field as it is') is the
+        'Custom' entry; if there is none, the drop-down gets its own 'Custom'
+        entry at the end."""
         row = self._row(label)
         combo = QComboBox()
-        combo.addItems([p[0] for p in presets])
-        preset_map = {p[0]: p[1] for p in presets}
+        texts = [p[0] for p in presets]
+        empty = [i for i, p in enumerate(presets) if not p[1] and len(p) < 3]
+        if empty:
+            custom_index = empty[0]
+        else:
+            texts.append("Custom (own value)")
+            custom_index = len(texts) - 1
+        combo.addItems(texts)
         row.addWidget(combo, 1)
         self.form.addLayout(row)
 
+        record = {
+            "combo": combo, "custom": custom_index,
+            "values": {i: dict(p[1]) for i, p in enumerate(presets) if p[1]},
+            "dynamic": {i: p[2] for i, p in enumerate(presets) if len(p) > 2},
+            "keys": {k for p in presets for k in p[1]},
+        }
+
         def on_select(index):
-            values = preset_map.get(combo.itemText(index))
-            if values:
-                for field_key, field_value in values.items():
-                    self.fields[field_key].set(field_value)
+            for field_key, field_value in record["values"].get(index, {}).items():
+                self.fields[field_key].set(field_value)
 
         combo.currentIndexChanged.connect(on_select)
+        if not hasattr(self, "_presets"):
+            self._presets = []
+        self._presets.append(record)
+        self._sync_presets()
         if hint:
             self.add_hint(hint)
         return combo
 
+    def _refresh_dynamic_presets(self, record):
+        """Ask each resolver of a preset list for its text and values (the
+        selected pipeline can have changed)."""
+        combo = record["combo"]
+        for index, resolver in record["dynamic"].items():
+            try:
+                text, values = resolver(getattr(self, "pipeline", None))
+            except Exception:
+                continue
+            values = dict(values or {})
+            if values:
+                record["values"][index] = values
+                record["keys"].update(values)
+            else:
+                record["values"].pop(index, None)
+            if combo.itemText(index) != text:
+                combo.blockSignals(True)
+                combo.setItemText(index, text)
+                combo.blockSignals(False)
+
+    def _sync_presets(self):
+        """Set each preset drop-down to the preset that matches the boxes,
+        or to 'Custom'. The signals of the drop-down are blocked: the sync
+        never writes a value into a box."""
+        for record in getattr(self, "_presets", []):
+            self._refresh_dynamic_presets(record)
+            if not all(k in self.fields for k in record["keys"]):
+                continue        # a box is not built yet - the page syncs again later
+            index = record["custom"]
+            for i, values in record["values"].items():
+                if all(_same_value(self.fields[k].get(), v) for k, v in values.items()):
+                    index = i
+                    break
+            combo = record["combo"]
+            if combo.currentIndex() != index:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+
+    def _field_registered(self, key, ref):
+        widget = getattr(ref, "widget", None)
+        watched = self.__dict__.setdefault("_watched_fields", set())
+        if isinstance(widget, QLineEdit) and key not in watched:
+            watched.add(key)
+            widget.textChanged.connect(lambda _text, k=key: self._on_field_edited(k))
+        self._sync_presets()
+
+    def _on_field_edited(self, key):
+        """Any change of a box: an edit by the user ends the green mark of
+        that box (a value that the page sets itself is handled in
+        _refresh_auto_defaults, which sets the mark after the value)."""
+        if not self.__dict__.get("_auto_setting"):
+            self._set_auto_highlight(key, False)
+        self._sync_presets()
+
+    def _set_auto_highlight(self, key, on):
+        field = self.fields.get(key)
+        widget = getattr(field, "widget", None)
+        if not isinstance(widget, QLineEdit):
+            return
+        saved = self.__dict__.setdefault("_auto_highlight_saved", {})
+        if on:
+            saved.setdefault(key, widget.styleSheet())
+            widget.setStyleSheet(_AUTO_FILL_STYLE)
+        elif key in saved:
+            widget.setStyleSheet(saved.pop(key))
+        legend = getattr(self, "_highlight_legend", None)
+        if legend is not None:
+            legend.setVisible(bool(saved))
+
     def add_radio_choice(self, key, label, options, default=None, hint=None):
         if label:
-            self.form.addWidget(QLabel(label))
+            label_row = QHBoxLayout()
+            label_row.addWidget(QLabel(label), 1)
+            self.form.addLayout(label_row)
+            if not hasattr(self, "_help_rows"):
+                self._help_rows = {}
+            self._help_rows[key] = label_row
         ref = RadioGroupRef()
         for display_label, value in options:
             radio = QRadioButton()
@@ -832,6 +1250,13 @@ class StageFieldsMixin:
         self.form.addWidget(label)
         self._pipeline_label_widget = label
         self._update_pipeline_label_widget()
+        legend = QLabel("Green boxes were filled in from the selected pipeline. "
+                        "A box that you edit is not green any more.")
+        legend.setWordWrap(True)
+        legend.setStyleSheet("color: #2e7d32; font-size: 8pt;")
+        legend.setVisible(False)
+        self.form.addWidget(legend)
+        self._highlight_legend = legend
         return label
 
     def _update_pipeline_label_widget(self):
@@ -843,7 +1268,8 @@ class StageFieldsMixin:
             f"Pipeline: {compartment} / {pipeline_label(self.pipeline)}")
         self._pipeline_label_widget.show()
 
-    def add_project_picker_button(self, field_key, groups_fn, extra_on_pick=None):
+    def add_project_picker_button(self, field_key, groups_fn, extra_on_pick=None,
+                                  empty_text=None):
         """Adds a "Choose from project..." button below field_key's own
         field - field_key's field must already have been added (via
         add_file_field()/add_file_or_folder_field()) before this call.
@@ -885,7 +1311,8 @@ class StageFieldsMixin:
         def open_picker():
             if self.pipeline is None:
                 return
-            ProjectFilePicker(self, self.pipeline.project, groups_fn(), on_pick).exec()
+            ProjectFilePicker(self, self.pipeline.project, groups_fn(), on_pick,
+                              empty_text=empty_text).exec()
 
         button = QPushButton("Choose from project...")
         button.clicked.connect(open_picker)
@@ -1017,13 +1444,23 @@ class StageFieldsMixin:
         pipeline=None."""
         if getattr(self, "_pipeline_label_widget", None) is None:
             return
+        old_key = self._pipeline_key(getattr(self, "pipeline", None))
         self.pipeline = pipeline
         self._update_pipeline_label_widget()
         for button in getattr(self, "_picker_buttons", []):
             button.setVisible(pipeline is not None)
         for button, condition_fn in getattr(self, "_conditional_buttons", []):
             button.setVisible(condition_fn(pipeline))
-        self._refresh_auto_defaults()
+        self._refresh_auto_defaults(switched=self._pipeline_key(pipeline) != old_key)
+        self._sync_presets()
+
+    @staticmethod
+    def _pipeline_key(pipeline):
+        if pipeline is None:
+            return None
+        project = getattr(pipeline, "project", None)
+        return (str(getattr(project, "root", "")), getattr(pipeline, "kind", None),
+                getattr(pipeline, "pipeline_id", None))
 
     def resolve_project_output_default(self, pipeline, stage_name, extension):
         """Returns this stage's default project-mode Output path (an
@@ -1051,7 +1488,7 @@ class StageFieldsMixin:
 
     # -- auto-filled defaults ---------------------------------------------
 
-    def register_auto_default(self, key, resolver):
+    def register_auto_default(self, key, resolver, fill_now=False):
         """Marks field `key` as auto-filled: resolver(pipeline) -> str
         (or "" when nothing applies, e.g. manual mode).
 
@@ -1062,27 +1499,67 @@ class StageFieldsMixin:
         - at Run time, if the field is empty (so "clear the field and
           press Run" always gives the correct project path).
 
-        A value the user typed or browsed to is never replaced: the
-        field is only re-filled while it is empty or still holds the
-        exact value this mechanism put there last time."""
+        A value the user typed or browsed to is not replaced, with one
+        exception (update 28): on a pipeline switch, a file path that points
+        inside the project (for example a file that was chosen from the old
+        pipeline) is replaced, because it belongs to the old pipeline. A path
+        outside the project stays. A box that a switch fills in is green.
+
+        fill_now=True fills an empty field from resolver at once (the page
+        build); the value is not green."""
         self._auto_defaults = getattr(self, "_auto_defaults", None) or {}
+        if fill_now and not self.fields[key].get().strip():
+            try:
+                value = str(resolver(getattr(self, "pipeline", None)) or "")
+            except Exception:
+                value = ""
+            if value:
+                self._auto_setting = True
+                try:
+                    self.fields[key].set(value)
+                finally:
+                    self._auto_setting = False
+                self._rebase_advanced_key(key)
         self._auto_defaults[key] = {"resolver": resolver,
                                      "last": self.fields[key].get().strip()}
 
-    def _refresh_auto_defaults(self, only_empty=False):
+    def _in_project(self, value):
+        pipeline = getattr(self, "pipeline", None)
+        project = getattr(pipeline, "project", None)
+        root = getattr(project, "root", None)
+        if root is None or not _looks_like_path(value):
+            return False
+        try:
+            Path(value).resolve().relative_to(Path(root).resolve())
+            return True
+        except (ValueError, OSError):
+            return False
+
+    def _refresh_auto_defaults(self, only_empty=False, switched=False):
         for key, entry in (getattr(self, "_auto_defaults", None) or {}).items():
             current = self.fields[key].get().strip()
             if only_empty and current:
                 continue
             if current and not _same_value(current, entry["last"]):
-                continue  # user-edited - keep it
+                # The user edited the box. On a pipeline switch, a project
+                # path of the old pipeline still has to change.
+                if not (switched and self._in_project(current)):
+                    continue
             try:
                 new_value = entry["resolver"](getattr(self, "pipeline", None)) or ""
             except Exception:
                 new_value = ""
             new_value = str(new_value)
             if new_value != current:
-                self.fields[key].set(new_value)
+                self._auto_setting = True
+                try:
+                    self.fields[key].set(new_value)
+                finally:
+                    self._auto_setting = False
+                self._rebase_advanced_key(key)
+                self._set_auto_highlight(key, bool(switched and new_value))
+            elif switched:
+                self._set_auto_highlight(key, False)
             entry["last"] = new_value
 
     # -- project-mode output location check --------------------------------
@@ -1188,6 +1665,7 @@ class StageFieldsMixin:
             self._check_project_outputs()
             result = build_fn()
         except ValueError as e:
+            self._reveal_advanced_for_error(e)
             QMessageBox.critical(self, getattr(e, "title", "Missing input"), str(e))
             return
         except Exception as e:
@@ -1534,7 +2012,7 @@ class QStageDialog(QDialog, StageFieldsMixin):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(640, 720)  # UNVERIFIED GUESS - see test notes
-        self.fields = {}
+        self.fields = _FieldsDict(self)
         self._layout_stack = []
         self.on_output = on_output
         self.on_status = on_status
@@ -1569,7 +2047,7 @@ class QStagePanel(QWidget, StageFieldsMixin):
 
     def __init__(self, parent=None, on_output=None, on_status=None):
         super().__init__(parent)
-        self.fields = {}
+        self.fields = _FieldsDict(self)
         self._layout_stack = []
         self.on_output = on_output
         self.on_status = on_status

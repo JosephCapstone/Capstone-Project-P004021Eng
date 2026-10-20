@@ -135,7 +135,7 @@ MinPoints4Stat=5
 ProjDestIndex=1
 UseOriginalCloud=false
 ExportStdDevInfo=false
-ExportDensityAtProjScale=false
+ExportDensityAtProjScale=true
 MaxThreadCount=14
 UsePrecisionMaps=false
 PM1Scale=1
@@ -508,6 +508,43 @@ def inspect_rosbag_topics(bag_folder):
     }
 
 
+def ouster_cli_can_read(source):
+    """
+    Tells if the Ouster CLI backend can read `source`. Returns a tuple
+    (ok, reason). `reason` is None when ok is True. When ok is False, `reason`
+    is a short text that the Stage 1 dialog shows to the user.
+
+    The Ouster CLI reads raw Ouster sensor packets. It cannot read a point
+    cloud from another sensor, for example a Hesai driver that writes
+    PointCloud2 messages. The rules are:
+      - A .pcap or .osf file: ok (the file type is the Ouster type).
+      - A ROS2 bag folder: ok only if it has a topic of raw Ouster packets
+        (see inspect_rosbag_topics). If not, ok is False.
+      - Anything else (a ROS1 .bag, a missing path, a folder without
+        metadata.yaml): ok is True. This function does not block what it
+        cannot check. The backend gives its own error in that case.
+    PyYAML missing also gives ok True for the same reason.
+    """
+    path = Path(str(source))
+    if path.suffix.lower() in (".pcap", ".osf") or not path.is_dir():
+        return True, None
+    try:
+        info = inspect_rosbag_topics(path)
+    except RuntimeError:
+        return True, None
+    if info is None or info["raw_lidar_topic"]:
+        return True, None
+    if info["pointcloud2_topic"]:
+        return False, (
+            f"'{path.name}' has no raw Ouster packets. It has a PointCloud2 topic "
+            f"'{info['pointcloud2_topic']}'. The Ouster CLI backend cannot read this "
+            f"bag. Set Backend to KISS-ICP. For a Hesai sensor, use "
+            f"kiss_icp_config_hesai.yaml.")
+    return False, (
+        f"'{path.name}' has no raw Ouster packets and no PointCloud2 topic. "
+        f"The Ouster CLI backend cannot read this bag.")
+
+
 def build_decode_command(decode_script, bag_folder, output_bag, lidar_topic=None,
                           imu_topic=None, metadata_topic=None, points_topic=None):
     """
@@ -528,6 +565,46 @@ def build_decode_command(decode_script, bag_folder, output_bag, lidar_topic=None
     if points_topic:
         cmd += ["--points-topic", str(points_topic)]
     return cmd
+
+
+POINT_TIME_FIELD_NAMES = ("t", "timestamp", "time")
+
+
+def decoded_bag_has_point_time(bag_folder):
+    """
+    Update 26. Tells if a decoded bag (the output of decode_raw_packets.py)
+    has a time for each point. KISS-ICP needs this time to deskew. A bag that
+    decode_raw_packets.py made before update 26 has x, y and z only.
+
+    Reads only the first PointCloud2 message of the bag (rosbags 0.9.x and
+    0.10 or newer). Returns True (a time field is there), False (no time
+    field), or None (the answer is not known: rosbags is not installed, the
+    folder is not a bag, the bag has no PointCloud2 message, or an error).
+    """
+    try:
+        from rosbags.highlevel import AnyReader
+        try:
+            from rosbags.typesys import Stores, get_typestore      # rosbags 0.10 and newer
+        except ImportError:
+            reader = AnyReader([Path(bag_folder)])                 # rosbags 0.9.x
+        else:
+            reader = AnyReader([Path(bag_folder)],
+                               default_typestore=get_typestore(Stores.ROS2_HUMBLE))
+        reader.open()
+        try:
+            clouds = [c for c in reader.connections
+                      if c.msgtype == "sensor_msgs/msg/PointCloud2"]
+            if not clouds:
+                return None
+            for connection, _stamp, rawdata in reader.messages(connections=[clouds[0]]):
+                message = reader.deserialize(rawdata, connection.msgtype)
+                names = {field.name for field in message.fields}
+                return any(name in names for name in POINT_TIME_FIELD_NAMES)
+            return None
+        finally:
+            reader.close()
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -718,7 +795,7 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
                                  dataloader=None, topic=None, meta=None,
                                  voxel_size=None, min_range=None, map_max_range=None,
                                  map_max_horizontal=None, map_max_vertical=None,
-                                 pipeline=None):
+                                 pipeline=None, flying_pixel_filter=False):
     """
     Delegates to slam_kiss_icp.py - a second, genuinely different SLAM
     backend from ouster-cli's own bundled kiss-icp (same underlying
@@ -812,6 +889,14 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
     build_slam_command() (Ouster CLI) already uses - so Stage 2 (Level)'s
     distance-threshold guidance can read one field, regardless of which
     backend Stage 1 actually used.
+
+    flying_pixel_filter (update 23): True passes --flying-pixel-filter. The script
+    removes flying pixels (false points between a near and a far surface) from
+    every frame before SLAM. It finds the rows and columns of the scan from the
+    time stamps of the points, so it works only for a source that has them (the
+    Ouster pcap dataloader, an Ouster ROS bag). A frame without a usable layout
+    is not filtered, and the script says so at the end of the run. Recorded in
+    project mode as "flying_pixel_filter". Not tested with a real capture.
     """
     effective_voxel_size = voxel_size if voxel_size is not None else read_kiss_icp_voxel_size(config)
     effective_min_range = min_range if min_range is not None else read_kiss_icp_min_range(config)
@@ -833,6 +918,7 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
             "map_max_range": map_max_range,
             "map_max_horizontal": map_max_horizontal,
             "map_max_vertical": map_max_vertical,
+            "flying_pixel_filter": bool(flying_pixel_filter),
         })
 
     cmd = [sys.executable, str(kiss_icp_script),
@@ -856,6 +942,8 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
         cmd += ["--map-max-horizontal", str(map_max_horizontal)]
     if map_max_vertical is not None:
         cmd += ["--map-max-vertical", str(map_max_vertical)]
+    if flying_pixel_filter:
+        cmd.append("--flying-pixel-filter")
     return cmd
 
 
@@ -865,7 +953,9 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
 
 def build_level_command(level_script, input_ply, output_ply,
                          distance_threshold=None, max_planes=None, min_inlier_fraction=None,
-                         horizontal_threshold=None, pipeline=None):
+                         horizontal_threshold=None, pipeline=None,
+                         remove_below_floor=False, below_floor_margin=None,
+                         below_floor_keep_area=None):
     """
     Delegates to level_cloud.py. ouster-cli's SLAM has no gravity/leveling
     step, so the whole map inherits whatever tilt the sensor had at the
@@ -886,6 +976,17 @@ def build_level_command(level_script, input_ply, output_ply,
     mistake, confirmed on real data. Loosen this (lower it) only if a real
     floor/ceiling isn't clearing the bar at all; leave it alone otherwise.
 
+    remove_below_floor: Update 26. True removes the stray points far below
+    the floor (level_cloud.py --remove-below-floor). The script finds the
+    local floor of each 0.5 m cell and removes only SMALL groups of points
+    below it. A large group is kept (it can be real, for example a hole in
+    the deck). False (the default) removes nothing; the script still counts
+    the points below the floor in its report.
+    below_floor_margin: metres below the local floor (script default 0.30).
+    below_floor_keep_area: square metres of footprint from which a group is
+    kept (script default 0.25). Both are used only when remove_below_floor
+    is True.
+
     pipeline: optional project_manager.PipelineHandle for a baseline or
     scan pipeline - see build_slam_command()'s docstring for the full
     explanation (input_ply always used as given, start_stage call, and
@@ -893,12 +994,19 @@ def build_level_command(level_script, input_ply, output_ply,
     (pipeline=None, the default) is completely unaffected.
     """
     if pipeline is not None:
-        project_manager.start_stage(pipeline, "level", params={
+        params = {
             "distance_threshold": distance_threshold,
             "max_planes": max_planes,
             "min_inlier_fraction": min_inlier_fraction,
             "horizontal_threshold": horizontal_threshold,
-        })
+        }
+        if remove_below_floor:
+            # Recorded only when the option is on, so that the record of a run
+            # without the option is the same as before update 26.
+            params["remove_below_floor"] = True
+            params["below_floor_margin"] = below_floor_margin
+            params["below_floor_keep_area"] = below_floor_keep_area
+        project_manager.start_stage(pipeline, "level", params=params)
 
     cmd = [sys.executable, str(level_script),
            "--input", str(input_ply),
@@ -911,6 +1019,12 @@ def build_level_command(level_script, input_ply, output_ply,
         cmd += ["--min-inlier-fraction", str(min_inlier_fraction)]
     if horizontal_threshold is not None:
         cmd += ["--horizontal-threshold", str(horizontal_threshold)]
+    if remove_below_floor:
+        cmd += ["--remove-below-floor"]
+        if below_floor_margin is not None:
+            cmd += ["--below-floor-margin", str(below_floor_margin)]
+        if below_floor_keep_area is not None:
+            cmd += ["--below-floor-keep-area", str(below_floor_keep_area)]
     return cmd
 
 
@@ -1387,7 +1501,14 @@ def build_classify_command(classify_script, input_ply, output_ply, threshold=Non
                             cluster_min_samples=4, min_cluster_size=4, use_uncertainty=False,
                             pipeline=None, find_holes=False, hole_min_points=100,
                             hole_min_width=0.05, projection_radius=0.0,
-                            interior_point=None, hole_value=0.10):
+                            interior_point=None, hole_value=0.10,
+                            registration_error=None, registration_error_was=None,
+                            remove_background=None, density_drop=None,
+                            persist_with=None, persist_distance=0.10,
+                            persist_share=0.5, min_site_width=0.0, min_site_area=0.0,
+                            min_site_fill=0.0, min_site_flatness=0.0, max_site_aspect=0.0,
+                            unmatched_support=False, unmatched_empty_share=0.25,
+                            unmatched_changed_share=0.5, label_noise=False):
     """
     Delegates to m3c2_classify.py, which drops (or flags) points below the
     given distance threshold so the change-highlight cloud fed into
@@ -1433,6 +1554,72 @@ def build_classify_command(classify_script, input_ply, output_ply, threshold=Non
     None for the centre of all points) and hole_value (the value that
     change_inward shows for a hole - display only).
 
+    registration_error, registration_error_was (update 23; only with
+    use_uncertainty): registration_error is "auto" (the robust spread of the
+    distances of the input file) or a number in METRES. It replaces the
+    registration error that the Stage 5 run put into the uncertainty field.
+    registration_error_was is the registration error of that Stage 5 run, in
+    metres (the RegistrationError line of its params file). Both are needed;
+    without registration_error_was the script leaves the field as it is.
+
+    remove_background (update 23): a radius in METRES (for example 0.5), or None
+    for off. Subtracts the smooth part of the M3C2 distances before the tests
+    (m3c2_classify.py --remove-background). Use it when the two scans have a
+    smooth offset (SLAM drift). A damage that is wider than the radius is removed
+    with the background.
+
+    density_drop (update 23; only with find_holes): a ratio between 0 and 1
+    (for example 0.25), or None for off (m3c2_classify.py --density-drop). A core
+    point is treated as "no data" when the point count of the second scan in its
+    cylinder is less than this ratio times the median-scaled count of the first
+    scan. This finds holes that still have an M3C2 distance. It needs the two
+    count fields that CloudCompare writes when the M3C2 params file has
+    ExportDensityAtProjScale=true (the template above sets it since update 23).
+    A file without the fields: the script prints a note and does nothing.
+
+    persist_with (update 23): the path of a second Stage 5 (M3C2) result of the
+    SAME pair of scans, made with another Normal scale (for example half of the
+    first), or None for off (m3c2_classify.py --persist-with). Stage 6 runs on
+    this file too, with the same settings, and keeps a damage site only if at
+    least persist_share (0 to 1) of its points have a point of a site of the
+    second run within persist_distance (metres). It needs clustering. It
+    does not test holes or unmatched sites.
+
+    min_site_width, min_site_area, min_site_fill (update 23): the size and fill
+    limit (m3c2_classify.py --min-site-width, --min-site-area, --min-site-fill).
+    min_site_width is the narrowest width of a measured site in metres.
+    min_site_area is its area in square metres. min_site_fill is the share (0 to
+    1) of filled cells inside its outline. A value of 0 switches the limit off
+    (the default: the command is the same as before). A measured site (added,
+    removed, changed) that is below a limit is rejected. Holes and unmatched
+    sites are not tested. It needs clustering.
+
+    cluster_eps, cluster_min_samples, min_cluster_size (update 23): each is a
+    number, or the text "auto" (m3c2_classify.py: --cluster-eps auto and so on).
+    "auto" finds the value from the spacing of the core points in the input
+    file, so the same setting works for a core spacing of 5 mm and of 3 cm. A
+    number is used as given.
+
+    min_site_flatness, max_site_aspect (update 23): the shape limits
+    (m3c2_classify.py --min-site-flatness, --max-site-aspect). min_site_flatness
+    (0 to 1) is the smallest share of the points of a measured site whose normal is
+    within 20 degrees of the main normal of the site: a site on a join of two
+    surfaces has a low share. max_site_aspect is the largest value of long side
+    divided by short side: a strip along the foot of a wall has a high value. 0 =
+    off (the command is the same as before). Holes and unmatched sites are not
+    tested. They need clustering.
+
+    unmatched_support (update 23; only with find_holes): keep an unmatched site
+    only when the second scan has no points in the M3C2 cylinder for at least
+    unmatched_empty_share of its points, or the valid core points around it show a
+    significant change for at least unmatched_changed_share of them
+    (m3c2_classify.py --unmatched-support). False = off (the same command as before).
+
+    label_noise (update 23; only with find_holes): True gives change_type 1 or 2 to
+    every flagged point, also to the points that the clustering or a site limit
+    rejected (m3c2_classify.py --label-noise: the output of the versions before
+    update 23). False (the default) gives change_type 0 to those points.
+
     pipeline: optional project_manager.PipelineHandle for a DIFF pipeline.
     input_ply is always used exactly as given (see build_slam_command()'s
     docstring for the full explanation) - only start_stage() tracking
@@ -1444,6 +1631,22 @@ def build_classify_command(classify_script, input_ply, output_ply, threshold=Non
     if find_holes and not cluster:
         raise ValueError("Find holes needs clustering. Turn clustering on, or turn "
                          "Find holes off.")
+
+    if min_site_width < 0 or min_site_area < 0 or not 0.0 <= min_site_fill <= 1.0:
+        raise ValueError("The size limits must not be negative, and the fill limit must be "
+                         "between 0 and 1.")
+    size_limit_on = bool(min_site_width > 0 or min_site_area > 0 or min_site_fill > 0)
+
+    if min_site_flatness < 0 or min_site_flatness > 1 or max_site_aspect < 0:
+        raise ValueError("The normal share must be between 0 and 1, and the longest-to-"
+                         "shortest side limit must not be negative.")
+    if not (0.0 <= unmatched_empty_share <= 1.0 and 0.0 <= unmatched_changed_share <= 1.0):
+        raise ValueError("The two unmatched-support shares must be between 0 and 1.")
+    for _name, _value in (("cluster_eps", cluster_eps), ("cluster_min_samples", cluster_min_samples),
+                          ("min_cluster_size", min_cluster_size)):
+        if isinstance(_value, str) and _value.strip().lower() != "auto":
+            raise ValueError(f"{_name} must be a number or 'auto'.")
+    shape_limit_on = bool(min_site_flatness > 0 or max_site_aspect > 0)
 
     if pipeline is not None:
         project_manager.start_stage(pipeline, "classify", params={
@@ -1461,6 +1664,20 @@ def build_classify_command(classify_script, input_ply, output_ply, threshold=Non
             "projection_radius": projection_radius if find_holes else None,
             "interior_point": list(interior_point) if (find_holes and interior_point) else None,
             "hole_value": hole_value if find_holes else None,
+            "registration_error": (registration_error if use_uncertainty else None),
+            "registration_error_was": (registration_error_was if use_uncertainty else None),
+            "remove_background": remove_background,
+            "density_drop": density_drop if find_holes else None,
+            "persist_with": str(persist_with) if (persist_with and cluster) else None,
+            "persist_distance": persist_distance if (persist_with and cluster) else None,
+            "persist_share": persist_share if (persist_with and cluster) else None,
+            "min_site_width": min_site_width if (size_limit_on and cluster) else None,
+            "min_site_area": min_site_area if (size_limit_on and cluster) else None,
+            "min_site_fill": min_site_fill if (size_limit_on and cluster) else None,
+            "min_site_flatness": min_site_flatness if (shape_limit_on and cluster) else None,
+            "max_site_aspect": max_site_aspect if (shape_limit_on and cluster) else None,
+            "unmatched_support": bool(unmatched_support) if find_holes else None,
+            "label_noise": bool(label_noise) if find_holes else None,
         })
 
     cmd = [sys.executable, str(classify_script),
@@ -1489,6 +1706,36 @@ def build_classify_command(classify_script, input_ply, output_ply, threshold=Non
             cmd += ["--projection-radius", str(projection_radius)]
         if interior_point:
             cmd += ["--interior-point"] + [str(float(v)) for v in interior_point]
+    if remove_background:
+        cmd += ["--remove-background", str(remove_background)]
+    if find_holes and density_drop:
+        cmd += ["--density-drop", str(density_drop)]
+    if size_limit_on and cluster:
+        if min_site_width > 0:
+            cmd += ["--min-site-width", str(min_site_width)]
+        if min_site_area > 0:
+            cmd += ["--min-site-area", str(min_site_area)]
+        if min_site_fill > 0:
+            cmd += ["--min-site-fill", str(min_site_fill)]
+    if shape_limit_on and cluster:
+        if min_site_flatness > 0:
+            cmd += ["--min-site-flatness", str(min_site_flatness)]
+        if max_site_aspect > 0:
+            cmd += ["--max-site-aspect", str(max_site_aspect)]
+    if find_holes and unmatched_support:
+        cmd += ["--unmatched-support",
+                "--unmatched-empty-share", str(unmatched_empty_share),
+                "--unmatched-changed-share", str(unmatched_changed_share)]
+    if find_holes and label_noise:
+        cmd.append("--label-noise")
+    if persist_with and cluster:
+        cmd += ["--persist-with", str(persist_with),
+                "--persist-distance", str(persist_distance),
+                "--persist-share", str(persist_share)]
+    if use_uncertainty and registration_error is not None and registration_error != "":
+        cmd += ["--registration-error", str(registration_error)]
+        if registration_error_was is not None:
+            cmd += ["--registration-error-was", str(registration_error_was)]
     return cmd
 
 
@@ -1539,7 +1786,20 @@ def resolve_classify_output(output_ply):
                 # How the inside of the room was found (m3c2_classify.py
                 # --find-holes): "probe", "centroid" or "interior-point".
                 "interior_method", "n_orient_fallback",
-                "orient_disagree_with_centroid"):
+                "orient_disagree_with_centroid",
+                # Update 23: set only when the option was applied.
+                "n_density_low", "remove_background",
+                "persist_with", "n_persist_rejected", "n_persist_rejected_points",
+                "persist_rejected",
+                "min_site_width", "min_site_area", "min_site_fill", "n_size_rejected",
+                "n_size_rejected_points", "size_rejected",
+                # Update 23: the values of 'auto' and the shape, support and
+                # noise-label results.
+                "cluster_eps", "cluster_min_samples", "min_cluster_size", "cluster_auto",
+                "min_site_flatness", "max_site_aspect", "n_shape_rejected",
+                "n_shape_rejected_points", "shape_rejected",
+                "label_noise", "n_unlabelled_flagged", "unmatched_support",
+                "n_unmatched_support_rejected", "unmatched_support_rejected"):
         if key in summary:
             extra_fields[key] = summary[key]
     clusters = summary.get("clusters")
@@ -1657,8 +1917,25 @@ def _spread_statistics(d):
 THRESHOLD_HEAVY_MIN_SHARE = 0.05      # more than 5 % flagged ...
 THRESHOLD_HEAVY_RATIO = 5.0           # ... and more than 5 times the bell-curve share
 
+# Update 23. The suggested threshold is the larger of a floor and 4 times the
+# robust spread. The old suggestion (the 95th percentile of |distance|) flagged
+# about 5 % of the points on every scan, also on a scan with no change, and it
+# gave a threshold of a few millimetres when the spread was very small.
+THRESHOLD_FLOOR_M = 0.03              # the smallest threshold that the check suggests
+THRESHOLD_SIGMA_FACTOR = 4.0          # the suggestion is at least this many times the spread
+THRESHOLD_TINY_SPREAD_M = 0.01        # a spread below this is "tiny": the floor decides
+# Update 23: when the scans are well aligned (for example after ICP final overlap 95)
+# the robust spread is a few millimetres. The 3 cm floor is then the limit for
+# the damage that can be found (a smooth 5 cm dent gave only a 3 cm signal in the
+# test). Below this spread, the floor is lowered.
+THRESHOLD_LOW_FLOOR_M = 0.015         # the floor when the spread is below THRESHOLD_LOW_SPREAD_M
+THRESHOLD_LOW_SPREAD_M = 0.005        # a spread below this lowers the floor
 
-def m3c2_threshold_check(ply_path, threshold, field=M3C2_DISTANCE_FIELD):
+
+def m3c2_threshold_check(ply_path, threshold, field=M3C2_DISTANCE_FIELD,
+                         floor=None, sigma_factor=THRESHOLD_SIGMA_FACTOR,
+                         low_floor=THRESHOLD_LOW_FLOOR_M,
+                         low_floor_spread=THRESHOLD_LOW_SPREAD_M):
     """Compare a Stage 6 distance threshold (metres) with the distances of a
     Stage 5 (M3C2) result file.
 
@@ -1672,7 +1949,22 @@ def m3c2_threshold_check(ply_path, threshold, field=M3C2_DISTANCE_FIELD):
       heavy_tail           True when share_flagged is more than 5 % and more than
                            5 times share_bell_curve
       percentile_threshold the 95th percentile of |distance|. A threshold with this
-                           value flags about 5 % of the points.
+                           value flags about 5 % of the points. (Kept for older
+                           callers. The check does not suggest it any more.)
+      suggested_threshold  the larger of `floor` and `sigma_factor` x robust spread
+      suggested_basis      "floor" when the floor decides, "spread" when the spread
+                           decides
+      suggested_share      share of the valid distances with |distance| >= the
+                           suggested threshold
+      tiny_spread          True when the robust spread is below THRESHOLD_TINY_SPREAD_M.
+                           A threshold that comes only from the spread is then a few
+                           millimetres, and it flags noise.
+      floor                the floor that was used
+      floor_lowered        True when the robust spread is below `low_floor_spread`
+                           (default 0.5 cm) and the floor was replaced by `low_floor`
+                           (default 1.5 cm). It applies only when `floor` is None (the
+                           default 3 cm floor). A floor that the caller gives is never
+                           changed. Pass low_floor=None to switch this off.
     Never raises. Needs numpy and plyfile (None when they are not installed)."""
     try:
         import math
@@ -1695,6 +1987,13 @@ def m3c2_threshold_check(ply_path, threshold, field=M3C2_DISTANCE_FIELD):
     sigma = stats["robust_sigma"]
     bell = math.erfc(threshold / (sigma * math.sqrt(2.0))) if sigma > 0 else 0.0
     heavy = share > THRESHOLD_HEAVY_MIN_SHARE and share > THRESHOLD_HEAVY_RATIO * bell
+    lowered = False
+    if floor is None:
+        floor = THRESHOLD_FLOOR_M
+        if low_floor is not None and sigma < low_floor_spread and low_floor < floor:
+            floor, lowered = low_floor, True
+    from_spread = float(sigma_factor) * sigma
+    suggested = max(float(floor), from_spread)
     return {
         "stats": stats,
         "threshold": float(threshold),
@@ -1702,6 +2001,12 @@ def m3c2_threshold_check(ply_path, threshold, field=M3C2_DISTANCE_FIELD):
         "share_bell_curve": float(bell),
         "heavy_tail": bool(heavy),
         "percentile_threshold": stats["p95_abs"],
+        "suggested_threshold": float(suggested),
+        "suggested_basis": "spread" if from_spread > floor else "floor",
+        "suggested_share": float(np.mean(valid >= suggested)),
+        "tiny_spread": bool(sigma < THRESHOLD_TINY_SPREAD_M),
+        "floor": float(floor),
+        "floor_lowered": lowered,
     }
 
 
@@ -1716,14 +2021,39 @@ def threshold_check_text(check):
         f"Distances: 95 % are smaller than {s['p95_abs'] * 100:.2f} cm and 99 % are "
         f"smaller than {s['p99_abs'] * 100:.2f} cm.",
     ]
+    if "suggested_threshold" in check:
+        floor_cm = check["floor"] * 100
+        if check["suggested_basis"] == "spread":
+            reason = (f"{THRESHOLD_SIGMA_FACTOR:g} times the spread "
+                      f"({s['robust_sigma'] * 100:.2f} cm)")
+        else:
+            reason = (f"the floor of {floor_cm:.1f} cm. {THRESHOLD_SIGMA_FACTOR:g} times "
+                      f"the spread is only {THRESHOLD_SIGMA_FACTOR * s['robust_sigma'] * 100:.2f} cm")
+        lines.append(
+            f"Suggested threshold: {check['suggested_threshold'] * 100:.2f} cm "
+            f"({reason}). It flags {check['suggested_share'] * 100:.1f} % of the points.")
+        if check.get("floor_lowered"):
+            lines.append(
+                f"NOTE: the spread is under {THRESHOLD_LOW_SPREAD_M * 100:.1f} cm. The scans are "
+                f"well aligned, so the floor is lowered from {THRESHOLD_FLOOR_M * 100:.1f} cm to "
+                f"{floor_cm:.1f} cm. A smooth dent of 5 cm can give a signal of only 3 cm, so a "
+                f"threshold of {THRESHOLD_FLOOR_M * 100:.1f} cm can miss it. A damage smaller "
+                f"than {floor_cm:.1f} cm cannot be found with this threshold.")
+        elif check.get("tiny_spread"):
+            lines.append(
+                "NOTE: the spread is very small (under "
+                f"{THRESHOLD_TINY_SPREAD_M * 100:.0f} cm). A threshold from the spread alone "
+                f"would be a few millimetres, and it would flag scan noise. The floor of "
+                f"{floor_cm:.1f} cm decides. A smaller damage than the floor cannot be "
+                "found with this threshold.")
     if check["heavy_tail"]:
         lines.append(
             "WARNING: the distances have a heavy tail. Many points are far from zero, "
             "so a threshold of 2 to 3 times the spread flags too many points. These "
-            "points can join into very large damage sites. They can be noise, drift or "
-            "real change. A threshold from the 95th percentile "
-            f"({check['percentile_threshold'] * 100:.2f} cm) flags about 5 % of the "
-            "points. Use it as a start and look at the result in CloudCompare.")
+            "points can join into very large damage sites. They can be noise, a smooth "
+            "offset between the two scans (drift) or real change. Do not make the "
+            "threshold larger to remove them: this also removes small damage. Turn on "
+            "'Remove smooth background' in Stage 6, and look at the result in CloudCompare.")
     else:
         lines.append("The tail is not heavy. The threshold is a reasonable start.")
     return "\n".join(lines)
@@ -1936,8 +2266,10 @@ def registration_advice(entered_rms, estimate):
                 f"{estimate['p95_abs'] * 100:.2f} cm and 99 % are smaller than "
                 f"{estimate['p99_abs'] * 100:.2f} cm. A Stage 6 threshold of 2 to 3 "
                 f"times the spread ({sigma * 200:.2f} to {sigma * 300:.2f} cm) can flag "
-                "many more points than you expect. Use 'Check Threshold Against the "
-                "Diff File' in Stage 6 before you run it.")
+                "many more points than you expect. The Stage 6 default is 3 cm, or 4 "
+                "times the spread if that is larger. Use 'Check Threshold Against the "
+                "Diff File' in Stage 6 before you run it. If the tail is a smooth offset "
+                "between the scans, turn on 'Remove the smooth background' in Stage 6.")
     lines.append(
         "The spread includes some surface roughness, so it is an upper estimate of "
         "the registration error.")
@@ -2203,6 +2535,12 @@ def build_damage_detail_command(detail_script, flagged_ply, comparison_ply, outp
 
     CLI flags confirmed from extract_damage_detail.py's own argparse:
     --flagged, --comparison, --output, --radius (all required).
+
+    Update 24: the script now carries the CHANGE TYPE (change_type) of the
+    nearest flagged point when the flagged file has it (Stage 6 with "Find
+    holes"), and usd_export.py colours the DamageDetail layer by it. The
+    command does not change: --scalar defaults to auto. Use
+    flagged_has_change_type() to tell the user which one they will get.
     """
     return [sys.executable, str(detail_script),
             "--flagged", str(flagged_ply),
@@ -2363,3 +2701,223 @@ def default_surfaces_for_diff(pipeline):
     except Exception:
         return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Stage 8 helpers (update 24): which file goes where
+# ---------------------------------------------------------------------------
+
+def flagged_has_change_type(path):
+    """True if the .ply has a 'change_type' vertex field (Stage 6 with "Find
+    holes"), False if it has none, None if the file cannot be read. Reads the
+    header only, so it is fast for any file size."""
+    if not path:
+        return None
+    fields = read_ply_vertex_fields(path)
+    if fields is None:
+        return None
+    return any(name == "change_type" for name, _type in fields)
+
+
+def _recorded_stage_output(pipeline, stage_name):
+    """The absolute path of the output that project.json records for a stage
+    of this pipeline, when the file exists. "" otherwise. Never raises."""
+    try:
+        output = (pipeline.entry["stages"].get(stage_name, {}) or {}).get("output")
+        if not output:
+            return ""
+        path = project_manager.get_absolute_path(pipeline.project, output)
+        return str(path) if Path(path).is_file() else ""
+    except Exception:
+        return ""
+
+
+def default_detail_flagged_for_diff(pipeline):
+    """
+    The Stage 6 (Classify) output of this diff, for "Extract Damage Detail"
+    in Stage 8, or "" (manual mode, or Classify not run). Update 24.
+
+    Unlike default_flagged_for_diff() (the FlaggedPoints layer, only for a
+    'Keep all points' run), this is always the recorded Classify output:
+    the extraction needs the flagged points, with or without 'Keep all
+    points'. The best file has change_type (Stage 6 with "Find holes").
+    """
+    if pipeline is None or getattr(pipeline, "kind", None) != "diff":
+        return ""
+    return _recorded_stage_output(pipeline, "classify")
+
+
+def default_detail_comparison_for_diff(pipeline):
+    """
+    The comparison cloud for "Extract Damage Detail": the cloud that this
+    diff's Stage 5 run used as its comparison side (recorded as
+    stages.diff.params.comparison_input), when the file still exists. Else
+    the comparison side that project_manager.get_diff_inputs() gives.
+    "" in manual mode. Update 24. Never raises.
+    """
+    if pipeline is None or getattr(pipeline, "kind", None) != "diff":
+        return ""
+    try:
+        recorded = pipeline.entry["stages"].get("diff", {}).get("params", {}) \
+            .get("comparison_input")
+        if recorded:
+            path = project_manager.get_absolute_path(pipeline.project, recorded)
+            if Path(path).is_file():
+                return str(path)
+        inputs = project_manager.get_diff_inputs(pipeline)
+        if Path(inputs["comparison_path"]).is_file():
+            return str(inputs["comparison_path"])
+    except Exception:
+        return ""
+    return ""
+
+
+def suggest_export_inputs(pipeline):
+    """
+    The files that Stage 8 would use for its two required inputs, taken from
+    the project records. Update 24. Backs the button "Fill empty fields from
+    this diff". Returns a dict:
+        {"baseline": <path or "">, "baseline_from": <text>,
+         "change": <path or "">,   "change_from": <text>}
+    The text says which stage the file is from, for the message to the user.
+    Never raises. A key is "" when the project has no such file yet.
+
+    baseline: the project's baseline Cleanup output that project.json
+    records as current (else the newest Cleanup file). The scene environment
+    is the same for every diff, so this is the baseline pipeline's file, not
+    this diff's reference.
+    change: this diff's Stage 7 (Surface) output when there is one, else its
+    Stage 6 (Classify) output.
+    """
+    result = {"baseline": "", "baseline_from": "", "change": "", "change_from": ""}
+    if pipeline is None or getattr(pipeline, "kind", None) != "diff":
+        return result
+    try:
+        for group in project_manager.list_side_candidates(pipeline.project, "baseline"):
+            if group["stage_name"] != "cleanup" or not group["files"]:
+                continue
+            files = group["files"]
+            chosen = next((f for f in files if f.get("is_current")), files[0])
+            result["baseline"] = str(project_manager.get_absolute_path(
+                pipeline.project, chosen["path"]))
+            result["baseline_from"] = "Stage 3 (Cleanup) of the baseline"
+            break
+    except Exception:
+        pass
+    surface = _recorded_stage_output(pipeline, "surface")
+    if surface:
+        result["change"], result["change_from"] = surface, "Stage 7 (Surface) of this diff"
+    else:
+        classify = _recorded_stage_output(pipeline, "classify")
+        if classify:
+            result["change"], result["change_from"] = \
+                classify, "Stage 6 (Classify) of this diff (Stage 7 has no output)"
+    return result
+
+
+def largest_change_in_classify(output_ply):
+    """
+    The largest measured change (metres) among the added, removed and changed
+    damage sites in the .clusters.json that Stage 6 wrote next to
+    output_ply, or None (no file, no such site, or a read error). A hole or
+    an unmatched site has no magnitude and is not counted. Used by Stage 8 to
+    warn when the Extract Damage Detail radius is smaller than the largest
+    change (the script measures the radius from the baseline position).
+    """
+    try:
+        summary = json.loads(classify_clusters_path(output_ply).read_text(encoding="utf-8"))
+        values = [float(c["max_magnitude"]) for c in summary.get("clusters", [])
+                  if c.get("max_magnitude") is not None
+                  and c.get("type") in (None, "added", "removed", "changed")]
+        return max(values) if values else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Import of a point cloud that was made outside the pipeline (Update 23)
+# ---------------------------------------------------------------------------
+
+def import_point_cloud(input_path, output_path):
+    """
+    Makes the standard point cloud PLY file (element 'vertex', x/y/z and the
+    other standard names) from a PLY file that the stages cannot read as it
+    is. It calls normalize_ply() of scripts/import_pointcloud.py. Returns the
+    result dict of that function (see the script for the keys).
+
+    Raises ValueError with a text for the user if the file cannot be used.
+    project_manager.create_project_from_cloud() and add_scan_from_cloud()
+    take this function as their 'normalize' argument.
+    """
+    import importlib.util
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "import_pointcloud.py"
+    if not script.is_file():
+        raise ValueError(f"The script import_pointcloud.py was not found: {script}")
+    spec = importlib.util.spec_from_file_location("delta_import_pointcloud", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.normalize_ply(input_path, output_path)
+    except module.ImportError_ as exc:
+        raise ValueError(str(exc))
+
+
+def import_point_cloud_text(info):
+    """A short text for the user about an import (see import_pointcloud.summary_text)."""
+    lines = [f"Points: {info.get('n_points')}"]
+    extent = info.get("extent")
+    if extent:
+        lines.append("Size (x, y, z): " + " x ".join(f"{v:.3f}" for v in extent) + " units")
+    if info.get("median_spacing") is not None:
+        lines.append(f"Median point spacing: {info['median_spacing'] * 100:.2f} cm (if the unit is metres)")
+    if info.get("fields"):
+        lines.append("Fields: " + ", ".join(info["fields"]))
+    lines.extend(info.get("notes", []))
+    return "\n".join(lines)
+
+
+def ply_header_problem(path):
+    """
+    Reads only the header of a PLY file. Returns None if the file is not a PLY
+    file, cannot be read, or has an element 'vertex' with the properties x, y
+    and z. Returns a text for the user if the header is a PLY header but has
+    no such element.
+
+    Why: CloudCompare, started from the command line, reads the points only
+    from an element that it can identify (the name 'vertex'). A file with
+    another element name (for example 'params') gives 0 points, and
+    CloudCompare reports "not enough memory". This text names the real cause.
+    """
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(65536)
+    except OSError:
+        return None
+    if not head.startswith(b"ply"):
+        return None
+    end = head.find(b"end_header")
+    if end < 0:
+        return None
+    elements = []                      # [name, count, [property names]]
+    for line in head[:end].decode("ascii", "replace").splitlines():
+        words = line.split()
+        if len(words) >= 3 and words[0] == "element":
+            try:
+                elements.append([words[1], int(words[2]), []])
+            except ValueError:
+                return None
+        elif words and words[0] == "property" and elements:
+            elements[-1][2].append(words[-1])
+    for name, count, props in elements:
+        if name == "vertex" and count > 0 and {"x", "y", "z"} <= set(props):
+            return None
+    found = "; ".join(f"{name} ({count}): " + ", ".join(props) for name, count, props in elements) \
+        or "no element"
+    return (
+        "CloudCompare cannot read the points of this PLY file, because it has no element "
+        "'vertex' with the properties x, y and z. CloudCompare would report \"not enough memory\", "
+        "but memory is not the problem.\n\n"
+        f"The file has: {found}\n\n"
+        "Import the file first: use New Project or New Scan with this .ply file, or run "
+        "scripts/import_pointcloud.py --input <file> --output <new file>.")

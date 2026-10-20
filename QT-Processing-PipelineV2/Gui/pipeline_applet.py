@@ -1518,15 +1518,19 @@ def _default_segment_output_dir(pipeline):
     if pipeline is None:
         return ""
     folder = pipeline.root / pipeline.stage_folders["segment"]
-    compartment = pipeline.project.data["compartment"]
-    prefix = f"{compartment}_segment_"
+    # Update 27: the new name has the kind (baseline or scan). A folder with the old
+    # name still counts, so a new folder never gets the number of an old one.
+    prefix = pm.stage_name_prefix(pipeline, "segment")
     existing_numbers = []
     if folder.is_dir():
         for entry in folder.iterdir():
-            if entry.is_dir() and entry.name.startswith(prefix):
-                stem = entry.name[len(prefix):]
-                if stem.isdigit():
-                    existing_numbers.append(int(stem))
+            if not entry.is_dir():
+                continue
+            for each_prefix in pm._stage_name_prefixes(pipeline, "segment"):
+                if entry.name.startswith(each_prefix):
+                    stem = entry.name[len(each_prefix):]
+                    if stem.isdigit():
+                        existing_numbers.append(int(stem))
     next_seq = (max(existing_numbers) + 1) if existing_numbers else 1
     return str(folder / f"{prefix}{next_seq:03d}")
 

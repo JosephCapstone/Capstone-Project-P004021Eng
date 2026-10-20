@@ -36,7 +36,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from qt_stage_base import QStageDialog, QStagePanel, fmt_cm
+from qt_stage_base import QStageDialog, QStagePanel, fmt_cm, project_input_default
 
 try:
     import project_manager as pm
@@ -53,76 +53,141 @@ class Stage3CleanupFieldsMixin:
 
     def _build_cleanup_fields(self, pipeline=None):
         self.add_pipeline_label(pipeline)
+        self.add_hint("Cleanup removes stray points (noise) from the map with the SOR filter "
+                      "of CloudCompare. It can also align the cloud to a baseline.")
 
         self.add_file_field("input", "Input .ply:", [("PLY files", "*.ply")])
         self.add_project_picker_button(
             "input", lambda: pm.list_eligible_inputs(self.pipeline, "cleanup"))
+        self.register_auto_default(
+            "input", lambda p: project_input_default(p, "cleanup"), fill_now=True)
 
-        self.add_preset_selector("SOR preset:", [
+        sor_preset = self.add_preset_selector("SOR preset:", [
             ("Conservative - keeps more points, safer on sparse scans",
              {"sor_neighbors": "10", "sor_std_dev": "2.0"}),
-            ("Balanced - good default", {"sor_neighbors": "6", "sor_std_dev": "1.0"}),
+            ("Balanced - good default (6 neighbors, 2.0 std dev)",
+             {"sor_neighbors": "6", "sor_std_dev": "2.0"}),
             ("Aggressive - removes more noise, risk of losing real detail",
              {"sor_neighbors": "6", "sor_std_dev": "0.5"}),
         ])
-        self.add_text_field("sor_neighbors", "SOR neighbors:", default="6")
-        self.add_text_field("sor_std_dev", "SOR std dev:", default="1.0")
-        self.add_hint("Neighbors = how many nearby points are checked per point (higher = "
-                       "smoother statistic, slower). Std dev = how many standard deviations "
-                       "from the local average counts as an outlier (lower = more aggressive "
-                       "removal). For precise tuning, CloudCompare's own SOR dialog shows a "
-                       "live preview - dial it in there once, then reuse the same numbers "
-                       "here.")
 
         self.add_file_field("align_to", "Align to (optional baseline .ply):",
                              [("PLY files", "*.ply")])
+
+        # Update 27: pick any Cleanup output of the baseline or of another scan.
+        self.add_project_picker_button(
+            "align_to", lambda: pm.list_align_candidates(self.pipeline),
+            empty_text="No other pipeline of this project has a Stage 3 (Cleanup) output "
+                       "yet. Run Stage 3 on the baseline or on another scan first, or use "
+                       "Browse.")
 
         self.add_conditional_project_button(
             "Use Project Baseline (Cleanup output)",
             condition_fn=lambda p: p is not None and p.kind == "scan",
             on_click=self._use_project_baseline)
-        self.add_hint(
-            "Fills 'Align to' with this project's own baseline pipeline's cleanup output - "
-            "the usual choice for a comparison scan (a later diff's registration-error "
-            "figure reads this scan's icp_rms from whichever cleanup run actually happened, "
-            "so aligning to the real project baseline here is what makes a later "
-            "'vs. baseline' diff meaningful).")
 
         self.add_registered_baseline_preset("align_to")
-        self.add_hint("Optional. If set, runs ICP to fine-align this cloud onto the baseline "
-                       "after cleanup - use this when comparing a later scan to a stored "
-                       "baseline. Leave blank when just cleaning a standalone map - for "
-                       "example, when this cloud IS the baseline you're creating.")
-
-        self.add_text_field("icp_overlap", "ICP final overlap (%, optional):", default="")
-        self.add_hint(
-            "Only used with 'Align to'. A whole number from 10 to 100. ICP then uses only "
-            "this share of the points (the best matches) for the final fit. Points that "
-            "match badly (for example junk points, or an area that only one scan "
-            "saw) are left out. Blank = CloudCompare's own default. Try 90 and compare "
-            "the two RMS values. "
-            "A lower value uses fewer points for the fit, so do not go below about 80 "
-            "without a reason.")
 
         output_default = self.resolve_project_output_default(pipeline, "cleanup", ".ply")
         self.add_save_field("output", "Output .ply:", default_ext=".ply", default=output_default)
         self.register_auto_default(
             "output", lambda p: self.resolve_project_output_default(p, "cleanup", ".ply"))
-        self.add_hint("The name you want the cleaned result saved as. CloudCompare actually "
-                       "names the file itself when it runs - this gets detected and renamed "
-                       "to what you asked for automatically afterward (an explicit-naming "
-                       "CloudCompare flag was tried here previously but proved unreliable in "
-                       "real testing, so this detect-and-rename approach replaced it).")
+
+        # Update 29: the explanations are in "?" popups.
+        self.add_help(
+            "input",
+            "The point cloud to clean. Usually the output of Stage 2 (Level).",
+            when="Change it to clean a different cloud. In project mode the box fills "
+                 "from the selected pipeline.")
+        self.add_help(
+            "align_to",
+            "The baseline cloud. When you set it, ICP aligns this cloud onto the baseline "
+            "after the cleanup. 'Choose from project...' lists the Cleanup outputs of the "
+            "baseline and of the other scans of this project (every run, newest first). "
+            "It does not list the outputs of the pipeline that you work in. 'Use Project "
+            "Baseline' puts the Cleanup output of the baseline pipeline in the box.",
+            effects=[
+                ("Set", "this cloud is aligned to the baseline. Stage 5 can then compare "
+                        "the two clouds. Stage 5 reads the ICP RMS of this run for the "
+                        "registration error."),
+                ("Empty", "no alignment. The cloud is only cleaned."),
+            ],
+            when="This cloud is a later scan that you compare to a baseline. Leave it "
+                 "empty when this cloud is the baseline. Use 'Choose from project...' to "
+                 "select a new baseline after a second Cleanup run of the baseline.")
+        self.add_help(
+            "output",
+            "The name of the cleaned file. CloudCompare names the file itself when it "
+            "runs. Stage 3 finds the file and renames it to this name.",
+            when="Change it to save under another name. In project mode the name comes "
+                 "from the pipeline.")
+
+        # Settings that normally stay at their default values (closed block).
+        self.begin_advanced("Advanced")
+
+        self.add_text_field("sor_neighbors", "SOR neighbors:", default="6")
+        self.add_text_field("sor_std_dev", "SOR std dev:", default="2.0")
+        sor_preset.setCurrentIndex(1)       # Balanced: the same as the default values above
+        self.add_help(
+            "sor_neighbors",
+            "SOR (Statistical Outlier Removal) checks the neighbors of each point. This "
+            "value is the number of nearby points that SOR checks for each point.",
+            effects=[
+                ("Smaller", "SOR is faster. The statistic is less smooth, and more "
+                            "points can be removed by mistake."),
+                ("Larger", "the statistic is smoother. SOR is slower."),
+            ],
+            when="The map is sparse (use more neighbors), or the result is rough. "
+                 "CloudCompare's own SOR dialog shows a live preview. Find the values there "
+                 "once and use the same numbers here.")
+        self.add_help(
+            "sor_std_dev",
+            "How many standard deviations from the local average distance make a point an "
+            "outlier. SOR removes the point.",
+            effects=[
+                ("Smaller (0.5-1.0)", "SOR removes more points. It removes more noise, and "
+                                      "it also cuts thin structure such as ribs and pipes."),
+                ("Larger (2.0 or more)", "SOR removes fewer points. Some noise stays."),
+            ],
+            when="Noise stays in the map (lower the value), or thin parts of the "
+                 "compartment are gone (raise the value). On a noisy scan the noise raises "
+                 "the standard deviation, and then SOR removes few points with either value.")
+
+        self.add_text_field("icp_overlap", "ICP final overlap (%, optional):", default="95")
+        self.add_help(
+            "icp_overlap",
+            "Used only with 'Align to'. A whole number from 10 to 100. For the final fit, "
+            "ICP uses only this share of the points (the best matches). Points that match "
+            "badly are left out, for example junk points or an area that only one scan "
+            "saw.",
+            effects=[
+                ("Smaller (90)", "more bad matches are left out. Do not go below 90: the "
+                                 "alignment error can become large."),
+                ("Larger (100)", "all points pull the alignment, also bad matches. The "
+                                 "alignment can be wrong by some centimetres."),
+                ("Empty", "CloudCompare uses its own default."),
+            ],
+            when="Keep the default for normal use. Change it only if the alignment of a scan to the "
+                 "baseline is not correct.",
+            note="The RMS gets lower with a lower overlap, but the RMS is not the "
+                 "alignment error.")
 
         self.add_text_field(
             "register_as", "Also register this output as a manual-mode baseline for:",
             default="")
-        self.add_hint(
-            "Optional, and separate from project mode. If set, this run's cleaned output "
-            "becomes the active entry in the standalone baseline_registry.json (selectable "
-            "above, and in Stage 5's manual mode) - use this for manual-mode work outside a "
-            "project. In project mode, the project's own baseline pipeline already IS the "
-            "record that matters - no separate registration needed for that.")
+        self.add_help(
+            "register_as",
+            "A name for a baseline in baseline_registry.json. This run's cleaned output "
+            "becomes the active entry for that name. You can select it above in this "
+            "stage, and in manual mode of Stage 5.",
+            effects=[
+                ("Set", "the output is registered as a baseline."),
+                ("Empty", "nothing is registered."),
+            ],
+            when="You work in manual mode, outside a project. In project mode the baseline "
+                 "pipeline of the project is the record, and you do not use this field.")
+
+        self.end_advanced()
 
         self.form.addStretch(1)
 
@@ -150,6 +215,10 @@ class Stage3CleanupFieldsMixin:
                 "If you picked this from a preset dropdown, that entry may be stale "
                 "(the file was moved/renamed/deleted since it was registered). "
                 "Either fix the path or clear the field.")
+        for label, path in (("Input .ply", input_ply), ("Align to", align_to)):
+            problem = core.ply_header_problem(path) if path else None
+            if problem:
+                raise ValueError(f"{label}: {problem}")
         register_as = self.fields["register_as"].get().strip() or None
         try:
             neighbors = int(self.fields["sor_neighbors"].get())

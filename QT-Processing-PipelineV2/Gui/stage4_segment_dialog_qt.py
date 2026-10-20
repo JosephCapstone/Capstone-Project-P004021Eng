@@ -34,7 +34,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QLabel
 
-from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm
+from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm, project_input_default
 
 try:
     import project_manager as pm
@@ -65,15 +65,19 @@ def _default_segment_output_dir(pipeline):
     if pipeline is None:
         return ""
     folder = pipeline.root / pipeline.stage_folders["segment"]
-    compartment = pipeline.project.data["compartment"]
-    prefix = f"{compartment}_segment_"
+    # Update 27: the new name has the kind (baseline or scan). A folder with the old
+    # name still counts, so a new folder never gets the number of an old one.
+    prefix = pm.stage_name_prefix(pipeline, "segment")
     existing_numbers = []
     if folder.is_dir():
         for entry in folder.iterdir():
-            if entry.is_dir() and entry.name.startswith(prefix):
-                stem = entry.name[len(prefix):]
-                if stem.isdigit():
-                    existing_numbers.append(int(stem))
+            if not entry.is_dir():
+                continue
+            for each_prefix in pm._stage_name_prefixes(pipeline, "segment"):
+                if entry.name.startswith(each_prefix):
+                    stem = entry.name[len(each_prefix):]
+                    if stem.isdigit():
+                        existing_numbers.append(int(stem))
     next_seq = (max(existing_numbers) + 1) if existing_numbers else 1
     return str(folder / f"{prefix}{next_seq:03d}")
 
@@ -91,131 +95,264 @@ class Stage4SegmentFieldsMixin:
         optional_note.setStyleSheet("color: #b8860b; font-weight: bold;")
         self.form.addWidget(optional_note)
 
-        default_script = str(SCRIPTS_DIR / "segment_planes.py")
-        self.add_file_field("script", "Segment script (.py):", [("Python files", "*.py")],
-                             default=default_script)
         self.add_file_field("input", "Cleaned .ply (ideally leveled first):",
                              [("PLY files", "*.ply")])
         self.add_project_picker_button(
             "input", lambda: pm.list_eligible_inputs(self.pipeline, "segment"))
+        self.register_auto_default(
+            "input", lambda p: project_input_default(p, "segment"), fill_now=True)
 
         self.add_folder_field(
             "output_dir", "Output folder:", default=_default_segment_output_dir(pipeline))
         self.register_auto_default("output_dir", _default_segment_output_dir)
-        self.add_hint(
-            "A fresh, sequence-numbered folder each run keeps every past run's own files "
-            "from overwriting an earlier run's - pre-filled above, matching every other "
-            "stage's own output naming convention (just used as a folder name here instead "
-            "of a file name). Every .ply this run writes is also prefixed with this folder's "
-            "own name, so files stay distinguishable even if opened outside their folder. "
-            "The one file that matters most for carrying into the rest of a pipeline, "
-            "<name>_classified.ply (every input point, with a 'classification' field), is "
-            "what gets recorded as this stage's own output.")
-
-        self.add_checkbox(
-            "write_separate_surfaces",
-            "Also write each surface as its own separate .ply file", default=False)
-        self.add_hint(
-            "Off by default - <name>_classified.ply already carries every point through "
-            "the rest of the pipeline as one cloud. Turn this on to ALSO get "
-            "<name>_floor.ply, <name>_wall_1.ply, and so on, plus <name>_unclassified.ply, "
-            "written into the output folder alongside <name>_classified.ply - useful for "
-            "visually tuning parameters per surface, or so each surface becomes its own "
-            "separate prim in Omniverse (click a wall in the Stage panel to hide it). "
-            "manifest.json always lists every detected surface's name, point count, "
-            "normal, and Z range either way - only its 'file' entry per surface is left "
-            "blank when this is off.")
-
-        self.add_checkbox(
-            "envelope_filter",
-            "Flag unclassified points that sit outside the room as junk", default=True)
-        self.add_length_field("envelope_margin", "Envelope margin (cm):", default_m="0.15",
-                              min_cm=0.5, max_cm=200)
-        self.add_checkbox(
-            "write_envelope_filtered",
-            "Also write a separate copy with outside-envelope points removed", default=True)
-        self.add_hint(
-            "On by default. The detected floor/ceiling/wall points already describe the "
-            "room's own footprint and height range - any unclassified point that falls "
-            "outside BOTH of those (with the margin's worth of slack) is very unlikely to "
-            "be real interior content, and much more likely scan noise or a stray return "
-            "from beyond the walls. This adds an 'outside_envelope' field (0/1) to "
-            "<name>_classified.ply - labeled, not removed; every point stays in that file "
-            "either way, same as the 'classification' field already works. Margin: how "
-            "much slack (in both the footprint and the height range) before a point "
-            "counts as outside - a real wall's own points scatter a little around its "
-            "true position, so some slack avoids flagging real clutter near a wall as "
-            "junk; too large a value can let real outside junk through unflagged instead. "
-            "The separate-copy box (on by default) ALSO writes <name>_envelope_filtered.ply - "
-            "<name>_classified.ply with the flagged points actually removed. Stage 5 (Diff) "
-            "uses this copy, so the junk outside the room does not go into M3C2 and cannot "
-            "show as false damage. If no point is outside the room, the copy is not written "
-            "(it would be the same as <name>_classified.ply).")
 
         self.add_preset_selector("Distance threshold preset:", [
-            ("Default (5 cm, 20 max planes) - tested combo for a full room/compartment scan",
+            ("Default (5 cm, 20 max planes) - for a full room or compartment scan",
              {"distance_threshold": "0.05", "max_planes": "20",
               "min_inlier_fraction": "0.003", "cluster_eps": "0.5"}),
-            ("Tight (2 cm) - matches level_cloud.py's own script default",
+            ("Tight (2 cm)",
              {"distance_threshold": "0.02"}),
-            ("Medium (10 cm) - try if a real wall/floor doesn't survive as its own plane",
+            ("Medium (10 cm) - try if a wall or the floor is not found as its own plane",
              {"distance_threshold": "0.1"}),
             ("Loose (25 cm)", {"distance_threshold": "0.25"}),
         ])
         self.add_length_field("distance_threshold", "Distance threshold (cm):", default_m="0.05",
                               min_cm=0.1, max_cm=200)
-        self.add_hint(
-            "RANSAC plane-fit tolerance - same idea as Stage 2 (Level)'s own field. Roughly "
-            "match or exceed the voxel size used in Stage 1 (SLAM), for the same reason "
-            "Level's own hint explains: coarser voxels quantize points further from a "
-            "perfect plane than a tight tolerance allows.")
+
+        # Update 29: the explanations are in "?" popups (what it does, what the
+        # options do, when to change it).
+        self.add_help(
+            "input",
+            "The point cloud to divide into surfaces. Use the output of Stage 3 "
+            "(Cleanup). A cloud that Stage 2 (Level) leveled first gives the best result.",
+            when="Change it to segment a different cloud. In project mode the box fills "
+                 "from the selected pipeline.")
+        self.add_help(
+            "output_dir",
+            "The folder for the files of this run. Each run uses a new folder with a "
+            "sequence number, so a run does not overwrite an earlier run. Each .ply file "
+            "has the folder name as a prefix. The file <name>_classified.ply holds every "
+            "input point with a 'classification' field. The pipeline records this file as "
+            "the output of the stage.",
+            when="Change it to write to another folder. In project mode the folder comes "
+                 "from the pipeline.")
+        self.add_help(
+            "distance_threshold",
+            "How far a point can be from a plane and still count as part of that plane "
+            "(RANSAC plane fit). The idea is the same as in Stage 2 (Level).",
+            effects=[
+                ("Smaller (2 cm)", "strict. A wall or floor of a coarse map can fail to "
+                                   "become a plane."),
+                ("Larger (10-25 cm)", "loose. Planes are found on a coarse map. Points of "
+                                      "nearby surfaces can join the plane."),
+            ],
+            when="Surfaces are not found. Use a value near the Stage 1 voxel size or "
+                 "larger, because a coarse voxel puts points further from a perfect plane.")
+
+        # Settings that normally stay at their default values (closed block).
+        self.begin_advanced("Advanced")
+
+        default_script = str(SCRIPTS_DIR / "segment_planes.py")
+        self.add_file_field("script", "Segment script (.py):", [("Python files", "*.py")],
+                             default=default_script)
+        self.add_help(
+            "script",
+            "The Python script that does the segmentation.",
+            when="Change it only to use a changed copy of the script.")
+
+        self.add_checkbox(
+            "write_separate_surfaces",
+            "Also write each surface as its own separate .ply file", default=False)
+        self.add_help(
+            "write_separate_surfaces",
+            "Writes a separate file for each surface (<name>_floor.ply, "
+            "<name>_wall_1.ply and so on) and <name>_unclassified.ply, in the output "
+            "folder. manifest.json always lists each surface with its name, point count, "
+            "normal and Z range. With this box off, the 'file' entry of each surface in "
+            "the manifest is empty.",
+            effects=[
+                ("On", "you get one file for each surface in addition to "
+                       "<name>_classified.ply."),
+                ("Off", "only <name>_classified.ply carries all points through the "
+                        "pipeline, as one cloud."),
+            ],
+            when="You tune the parameters for each surface and want to look at each "
+                 "surface alone. Also use it when each surface must be its own prim in "
+                 "Omniverse (you can then hide a wall in the Stage panel).")
+
+        self.add_checkbox(
+            "envelope_filter",
+            "Flag unclassified points that sit outside the room as junk", default=True)
+        self.add_help(
+            "envelope_filter",
+            "The floor, ceiling and wall points show the footprint and the height range "
+            "of the room. An unclassified point outside both of them is more likely scan "
+            "noise or a stray return from beyond the walls than real content. This "
+            "option adds an 'outside_envelope' field (0 or 1) to <name>_classified.ply. "
+            "The points are labeled, not removed.",
+            effects=[
+                ("On", "points outside the room get the value 1."),
+                ("Off", "no point is flagged. The separate copy below is not written."),
+            ],
+            when="Keep it on for a normal run. Turn it off if real content outside the "
+                 "walls must stay unflagged.")
+        self.add_length_field("envelope_margin", "Envelope margin (cm):", default_m="0.15",
+                              min_cm=0.5, max_cm=200)
+        self.add_help(
+            "envelope_margin",
+            "How much slack the room envelope has, in the footprint and in the height "
+            "range, before a point counts as outside. The points of a wall scatter a "
+            "little around its true position.",
+            effects=[
+                ("Smaller", "clutter near a wall can be flagged as junk by mistake."),
+                ("Larger", "junk outside the room can stay unflagged."),
+            ],
+            when="Real clutter near a wall is flagged (raise the value), or junk outside "
+                 "the room is not flagged (lower the value).")
+        self.add_checkbox(
+            "write_envelope_filtered",
+            "Also write a separate copy with outside-envelope points removed", default=True)
+        self.add_help(
+            "write_envelope_filtered",
+            "Writes <name>_envelope_filtered.ply. It is <name>_classified.ply with the "
+            "flagged points removed. Stage 5 (Diff) uses this copy, so junk outside the "
+            "room does not go into M3C2 and cannot show as false damage.",
+            effects=[
+                ("On", "the copy is written. If no point is outside the room, the copy is "
+                       "not written, because it would be the same as the classified "
+                       "file."),
+                ("Off", "only the classified file is written."),
+            ],
+            when="Keep it on for a normal run.")
+
         self.add_text_field("max_planes", "Max planes to search:", default="20")
+        self.add_help(
+            "max_planes",
+            "How many planes Segment searches in the cloud.",
+            effects=[
+                ("Smaller", "faster. Small surfaces are not found when larger surfaces use "
+                            "up the count."),
+                ("Larger", "slower. More small surfaces are found."),
+            ],
+            when="A surface of the room is missing from the result. Raise the value.")
         self.add_text_field(
             "min_inlier_fraction", "Min plane size (fraction of all points):", default="0.003")
-        self.add_hint(
-            "A candidate plane must contain at least this fraction of all points to be "
-            "accepted at all. Raise this (e.g. 0.015) if too many small, spurious surfaces "
-            "are getting accepted instead of falling into 'unclassified'.")
+        self.add_help(
+            "min_inlier_fraction",
+            "A plane must hold at least this share of all points (0.003 = 0.3 %) to be "
+            "accepted.",
+            effects=[
+                ("Smaller", "small planes are accepted. More small false surfaces can "
+                            "appear."),
+                ("Larger", "only big planes are accepted. Small real surfaces go to "
+                           "'unclassified'."),
+            ],
+            when="Too many small false surfaces are accepted. Raise the value, for "
+                 "example to 0.015.")
         self.add_text_field("horizontal_threshold", "Horizontal threshold:", default="0.7")
+        self.add_help(
+            "horizontal_threshold",
+            "How flat a plane must be to count as a floor or ceiling and not as a wall. "
+            "The value is |normal.z|. 1.0 is exactly horizontal.",
+            effects=[
+                ("Smaller", "a plane that is more tilted still counts as floor or "
+                            "ceiling."),
+                ("Larger", "only a plane that is nearly flat counts as floor or "
+                           "ceiling."),
+            ],
+            when="A floor or ceiling is called a wall, or a wall is called a floor. "
+                 "Change the value in small steps.")
         self.add_length_field("max_horizontal_z_span", "Max horizontal Z span (cm):",
                               default_m="0.3", min_cm=0.5, max_cm=500)
-        self.add_hint(
-            "Horizontal threshold: how close to perfectly flat (|normal.z|, 1.0 = exactly "
-            "horizontal) a plane must be to count as floor/ceiling rather than a wall. Max "
-            "horizontal Z span: a near-horizontal candidate whose points span more Z than "
-            "this is rejected as a likely diagonal-slice artifact rather than a real "
-            "floor/ceiling/table - a real one should only span its own thickness/noise, "
-            "not the better part of a meter.")
+        self.add_help(
+            "max_horizontal_z_span",
+            "A near-horizontal plane whose points span more height than this is rejected. "
+            "It is then probably a diagonal slice and not a real floor, ceiling or table. "
+            "A real one spans only its own thickness and noise.",
+            effects=[
+                ("Smaller", "a thick or noisy floor can be rejected."),
+                ("Larger", "diagonal slices can be accepted as a floor or ceiling."),
+            ],
+            when="A real floor or ceiling is rejected (raise the value), or a slice "
+                 "through the room is called a floor (lower the value).")
 
         self.add_checkbox(
             "cluster_filter", "Filter each surface to its largest connected cluster",
             default=True)
+        self.add_help(
+            "cluster_filter",
+            "The plane test checks only the distance to the infinite plane, not the real "
+            "edge of the surface. This option keeps only the largest connected group of "
+            "points of each plane (DBSCAN). Disconnected stray points go to "
+            "'unclassified'. The two fields below are not used when the box is off.",
+            effects=[
+                ("On", "each surface file holds one connected piece."),
+                ("Off", "stray points far from the surface can stay in the surface."),
+            ],
+            when="Keep it on for a normal run.")
         self.add_length_field("cluster_eps", "Cluster gap tolerance (cm):", default_m="0.5",
                               min_cm=0.5, max_cm=500)
+        self.add_help(
+            "cluster_eps",
+            "The largest gap between points that still counts as connected.",
+            effects=[
+                ("Smaller", "a surface with small holes splits into pieces. Only the "
+                            "largest piece stays."),
+                ("Larger", "more distant points join the surface. Stray points can stay."),
+            ],
+            when="A surface loses real parts (raise the value), or stray points stay in "
+                 "a surface (lower the value).")
         self.add_text_field("cluster_min_points", "Cluster min points:", default="20")
-        self.add_hint(
-            "RANSAC's inlier test only checks distance to the infinite plane equation, not "
-            "a surface's real physical boundary - this keeps only the largest "
-            "spatially-connected group of points per plane (DBSCAN), moving disconnected "
-            "stray points to 'unclassified' instead of leaving them mixed into e.g. "
-            "floor.ply. Gap tolerance: max gap between points to still count as connected. "
-            "Min points: minimum points to count as a real cluster at all. Both are "
-            "ignored if the checkbox above is unchecked.")
+        self.add_help(
+            "cluster_min_points",
+            "The smallest number of points that counts as a cluster.",
+            effects=[
+                ("Smaller", "very small groups count as clusters."),
+                ("Larger", "small groups are rejected as noise."),
+            ],
+            when="Small groups of noise stay in a surface. Raise the value.")
 
         self.add_checkbox(
             "merge_coplanar", "Merge split detections of the same physical plane",
             default=True)
+        self.add_help(
+            "merge_coplanar",
+            "A wall that clutter hides in the middle can be found as two surfaces that "
+            "look the same. A ceiling that is split in this way loses its other half to "
+            "a wrong 'horizontal_surface_N' label. This option joins such surfaces. The "
+            "two fields below are not used when the box is off.",
+            effects=[
+                ("On", "surfaces that have the same normal and plane position are joined."),
+                ("Off", "split surfaces stay split."),
+            ],
+            when="Keep it on for a normal run.")
         self.add_text_field(
             "merge_normal_cos", "Merge normal similarity (1.0 = exactly parallel):",
             default="0.98")
+        self.add_help(
+            "merge_normal_cos",
+            "How parallel two planes must be to join. 1.0 is exactly parallel.",
+            effects=[
+                ("Smaller", "planes with a larger angle between them can join."),
+                ("Larger", "only planes that are almost exactly parallel join."),
+            ],
+            when="Two parts of one wall stay separate (lower the value), or two "
+                 "different surfaces join (raise the value).")
         self.add_length_field("merge_distance", "Merge plane distance (cm):", default_m="0.1",
                               min_cm=0.1, max_cm=200)
-        self.add_hint(
-            "Confirmed on real data: a wall obstructed mid-span by clutter can get "
-            "detected as two separate, duplicate-looking surfaces instead of one - and a "
-            "ceiling split this way loses its other half to a misleading "
-            "'horizontal_surface_N' label instead of being combined back in. Both fields "
-            "below are ignored if the checkbox above is unchecked.")
+        self.add_help(
+            "merge_distance",
+            "How close two parallel planes must be to join.",
+            effects=[
+                ("Smaller", "only planes at nearly the same position join."),
+                ("Larger", "planes that are further apart can join, also two different "
+                           "surfaces."),
+            ],
+            when="Two parts of one wall stay separate (raise the value), or two "
+                 "different surfaces join (lower the value).")
+
+        self.end_advanced()
+        self.keep_field_order("script", "input", "output_dir")
 
         self.form.addStretch(1)
 

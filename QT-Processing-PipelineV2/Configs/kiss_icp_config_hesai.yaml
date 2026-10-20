@@ -1,0 +1,44 @@
+# kiss_icp_config_hesai.yaml
+# ===========================
+# KISS-ICP settings for a Hesai XT32-type lidar, via slam_kiss_icp.py
+# (Stage 1's KISS-ICP backend). Made 2026-10-16 (Update 22).
+#
+# This is a SENSOR profile. Use it with a Hesai bag. Use
+# kiss_icp_config_indoor.yaml with the Ouster OS0-128.
+#
+# WHAT IS DIFFERENT FROM kiss_icp_config_indoor.yaml
+#   data.min_range: 0.1  (was 0.0)
+#     The Hesai driver writes a return that did not come back as a point at
+#     exactly (0, 0, 0). Two real stationary bags had about 4900 of 57856
+#     points per frame like that. slam_kiss_icp.py already removes them when it
+#     reads a ROS2 bag. min_range 0.1 removes them also for any other source.
+#     No real point was closer than 0.1 m in those bags.
+#     This value does NOT remove the parts of the robot that the sensor can see.
+#     Measure them on a recording with the sensor on the QBot, then set a larger
+#     value (see "Min range override" in Stage 1).
+#
+# ALL OTHER VALUES ARE THE SAME AS THE OUSTER CONFIG. THEY ARE NOT TUNED FOR
+# HESAI. They are a start. Reasons that they can need a change:
+#   - One XT32 frame had about 13000 points that are not duplicates and are
+#     farther than 0.5 m. The OS0-128 gives about 131000 points per frame.
+#   - Vertical spacing is about 1 degree (about 5 cm at 3 m). Horizontal spacing
+#     is about 0.4 degree (about 2 cm at 3 m).
+# What is not tested: a moving recording. Tune voxel_size and max_range on a
+# recording of the QBot with a known path (see claude/SIM_AND_SLAM_NOTES.md).
+
+adaptive_threshold:
+  fixed_threshold: null
+  initial_threshold: 2.0
+  min_motion_th: 0.1
+data:
+  deskew: true
+  max_range: 15.0
+  min_range: 0.1
+mapping:
+  max_points_per_voxel: 20
+  voxel_size: 0.05
+out_dir: results
+registration:
+  convergence_criterion: 0.0001
+  max_num_iterations: 500
+  max_num_threads: 0

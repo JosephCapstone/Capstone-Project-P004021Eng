@@ -102,7 +102,10 @@ Usage:
 
 import argparse
 import json
+import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -172,6 +175,623 @@ def find_uncertainty_field(vertex, distance_field_name):
         if with_distance:
             return with_distance[0]
     return candidates[0]
+
+
+def estimate_background(xyz, normals, distances, radius, min_neighbors=5, min_dot=0.9):
+    """
+    The smooth part of the M3C2 distances: for every core point, the median of
+    the distances of the core points within `radius` (metres) that lie on the
+    same surface (the normals differ by less than about 25 degrees).
+
+    Why: two scans of the same room never fit perfectly. The SLAM error of
+    each scan is a smooth offset that changes slowly over the surface (a band
+    some tens of centimetres wide). It is as large as a small damage (5 cm),
+    and it is different in each pair of scans. Real damage has sharp edges. A
+    median over a wide area follows the smooth offset and ignores a damage
+    that covers less than half of the area. Distances minus this background
+    show the damage.
+
+    Limits:
+      - A damage that covers more than half of the circle of `radius` is part
+        of the background and is removed. Use a radius that is larger than the
+        largest damage that you expect (the default of 0.5 m is for damage up
+        to about 0.6 m wide).
+      - A core point with fewer than `min_neighbors` neighbours on the same
+        surface, or with no normal, gets a background of 0 (no change).
+
+    How: the median is computed for one anchor point in every cell of
+    radius / 4, and each core point takes the value of the nearest anchor on
+    the same surface. This is much faster than one median per core point and
+    the difference is below 1 mm. The sign of the distance depends on the
+    direction of the normal, so a neighbour with the opposite normal counts
+    with the opposite sign.
+
+    Returns an array with the background (metres), 0 where there is none.
+    """
+    from scipy.spatial import cKDTree
+
+    n_points = len(xyz)
+    background = np.zeros(n_points, dtype=np.float64)
+    nrm_len = np.linalg.norm(normals, axis=1)
+    valid = np.isfinite(distances) & np.isfinite(xyz).all(axis=1) \
+        & np.isfinite(normals).all(axis=1) & (nrm_len > 0.5)
+    index = np.where(valid)[0]
+    if len(index) < min_neighbors * 2 or radius <= 0:
+        return background
+    pts = xyz[index]
+    nrm = normals[index] / nrm_len[index][:, None]
+    dist = distances[index]
+    tree = cKDTree(pts)
+
+    spacing = radius / 4.0
+    cell = np.floor((pts - pts.min(axis=0)) / spacing).astype(np.int64)
+    packed = (cell[:, 0] << 42) | (cell[:, 1] << 21) | cell[:, 2]
+    _, anchor = np.unique(packed, return_index=True)
+    anchor_value = np.zeros(len(anchor), dtype=np.float64)
+    anchor_ok = np.zeros(len(anchor), dtype=bool)
+    for a in range(0, len(anchor), 500):
+        part = anchor[a:a + 500]
+        neighbours = tree.query_ball_point(pts[part], radius)
+        for k, ids in enumerate(neighbours):
+            ids = np.asarray(ids, dtype=np.int64)
+            dot = nrm[ids] @ nrm[part[k]]
+            same = np.abs(dot) >= min_dot
+            if same.sum() >= min_neighbors:
+                anchor_value[a + k] = np.median(dist[ids[same]] * np.sign(dot[same]))
+                anchor_ok[a + k] = True
+
+    # Every core point takes the value of the nearest anchor that has a value
+    # and lies on the same surface.
+    anchor_tree = cKDTree(pts[anchor])
+    anchor_nrm = nrm[anchor]
+    k = min(12, len(anchor))
+    reach = 2.5 * spacing
+    result = np.zeros(len(index), dtype=np.float64)
+    for a in range(0, len(index), 200000):
+        b = min(a + 200000, len(index))
+        d_anchor, nb = anchor_tree.query(pts[a:b], k=k, distance_upper_bound=reach)
+        d_anchor = d_anchor.reshape(b - a, k)
+        nb = nb.reshape(b - a, k)
+        good = np.isfinite(d_anchor)
+        safe = np.where(good, nb, 0)
+        dot = np.einsum("ij,ikj->ik", nrm[a:b], anchor_nrm[safe])
+        good &= (np.abs(dot) >= min_dot) & anchor_ok[safe]
+        first = good.argmax(axis=1)
+        has = good.any(axis=1)
+        rows = np.arange(b - a)
+        pick = safe[rows, first]
+        sign = np.where(dot[rows, first] >= 0, 1.0, -1.0)
+        result[a:b] = np.where(has, anchor_value[pick] * sign, 0.0)
+    background[index] = result
+    return background
+
+
+def find_density_fields(field_names):
+    """
+    Finds the two point-count fields that CloudCompare writes when the M3C2
+    parameter ExportDensityAtProjScale is true: the number of points of cloud 1
+    and of cloud 2 inside the projection cylinder of each core point. Returns
+    (name_of_cloud1, name_of_cloud2), or None when the file has no such pair.
+
+    The on-disk names vary (for example 'Npoints_cloud1' or 'density [cloud1]',
+    with or without the prefix 'scalar_'), so the match is on a normalised name:
+    it must have a word for a count (npoints, density, count) and end with, or
+    contain, 'cloud1' / 'c1' (or the 2 forms). If the match is not exactly one
+    field for each cloud, the result is None. Use --density-fields to give the
+    names then.
+    """
+    def normal(name):
+        name = name.lower()
+        if name.startswith("scalar_"):
+            name = name[len("scalar_"):]
+        return re.sub(r"[^a-z0-9]", "", name)
+
+    count_words = ("npoints", "numpoints", "density", "pointcount", "count")
+    first, second = [], []
+    for name in field_names:
+        n = normal(name)
+        if not any(w in n for w in count_words):
+            continue
+        if "cloud1" in n or "c1" in n or n.endswith("1"):
+            first.append(name)
+        elif "cloud2" in n or "c2" in n or n.endswith("2"):
+            second.append(name)
+    if len(first) == 1 and len(second) == 1:
+        return first[0], second[0]
+    return None
+
+
+def density_drop_mask(n1, n2, ratio, min_base_points=20):
+    """
+    The core points where cloud 2 has much fewer points than cloud 1.
+
+    n1, n2: the point counts in the projection cylinder (cloud 1 = the cloud
+    with the core points, cloud 2 = the other cloud). The two scans can have a
+    different density everywhere, so the ratio n2 / n1 is divided by its
+    median (over all core points with at least min_base_points of cloud 1)
+    before the test. A point is low when this relative ratio is below `ratio`.
+
+    Why: where a hole opens in the second scan, M3C2 still finds a distance
+    for a core point when its cylinder reaches the points around the hole. The
+    distance is then not reliable, but the count of cloud 2 drops. The drop
+    shows the hole even when the distance has a value.
+
+    Returns (low, median_ratio, n_tested): low is a boolean array, median_ratio
+    is the median of n2 / n1 (None when there is no data), n_tested is the
+    number of core points that were tested.
+    """
+    n1 = np.asarray(n1, dtype=np.float64)
+    n2 = np.asarray(n2, dtype=np.float64)
+    tested = np.isfinite(n1) & np.isfinite(n2) & (n1 >= min_base_points)
+    low = np.zeros(len(n1), dtype=bool)
+    if tested.sum() < 100:
+        return low, None, int(tested.sum())
+    relative = np.zeros(len(n1), dtype=np.float64)
+    relative[tested] = n2[tested] / n1[tested]
+    median = float(np.median(relative[tested]))
+    if median <= 0:
+        return low, None, int(tested.sum())
+    low[tested] = (relative[tested] / median) < ratio
+    return low, median, int(tested.sum())
+
+
+def persistence_filter(xyz, cluster_id, clusters, other_points, distance, share):
+    """
+    Keeps the damage sites that a second M3C2 run (another scale) also finds.
+
+    Why: a site that comes from the scale of the first run only (for example a
+    band of smooth offset between two scans, or noise on a curved surface) changes
+    when the scale changes. Real damage is there at both scales.
+
+    xyz: the core points of the first run. cluster_id: one integer for each core
+    point (-1 = no site). clusters: the site records of the first run (each has
+    "cluster_id"). other_points: the core points of the second run that belong to
+    a site there (n x 3). distance: how near (metres) a point of the second run
+    must be to a point of the site. share: the share (0 to 1) of the points of a
+    site that need a point of the second run within `distance`.
+
+    Returns (new_cluster_id, new_clusters, rejected, n_rejected_points):
+      - new_cluster_id: the ids of the kept sites are 0, 1, 2, ... in the old order;
+        the points of a rejected site get -1.
+      - new_clusters: the kept records (a copy, with the new "cluster_id").
+      - rejected: one record for each rejected site: the old id, "centroid",
+        "point_count" and "persist_share" (the share that was found).
+      - n_rejected_points: the number of points of the rejected sites.
+    A site with no point at all counts as not found.
+    """
+    from scipy.spatial import cKDTree
+
+    new_cluster_id = np.full(len(cluster_id), -1, dtype=np.int64)
+    kept, rejected = [], []
+    n_rejected_points = 0
+    tree = cKDTree(np.asarray(other_points, dtype=np.float64)) if len(other_points) else None
+    for record in clusters:
+        members = np.where(cluster_id == record["cluster_id"])[0]
+        found = 0.0
+        if tree is not None and len(members):
+            nearest, _ = tree.query(xyz[members])
+            found = float(np.mean(nearest <= distance))
+        if found >= share and len(members):
+            new_id = len(kept)
+            new_cluster_id[members] = new_id
+            kept.append({**record, "cluster_id": new_id, "persist_share": round(found, 3)})
+        else:
+            n_rejected_points += len(members)
+            rejected.append({"cluster_id": record["cluster_id"],
+                             "centroid": record["centroid"],
+                             "point_count": record["point_count"],
+                             "persist_share": round(found, 3)})
+    return new_cluster_id, kept, rejected, n_rejected_points
+
+
+def site_fill_fraction(local_xy):
+    """Share of the cells inside the outline of a site that hold at least one
+    point of the site. local_xy: (n, 2) positions in the plane of the site. The
+    cell size is 2 times the median distance to the nearest neighbour, so the
+    number does not depend on the point spacing. The outline is the convex hull,
+    so the number does not depend on how the site is turned in its plane. A
+    compact patch gives a number near 1 (a patch can be lower where the scan
+    has gaps). A ring-like or patchy false site gives a low number. A line gives
+    a high number: the short-side limit rejects a line."""
+    from scipy.spatial import cKDTree, ConvexHull
+    n = len(local_xy)
+    if n < 4:
+        return 1.0
+    spacing = float(np.median(cKDTree(local_xy).query(local_xy, k=2)[0][:, 1]))
+    cell = max(2.0 * spacing, 1e-6)
+    index = np.floor((local_xy - local_xy.min(axis=0)) / cell).astype(np.int64)
+    occupied = len(np.unique(index[:, 0] * (index[:, 1].max() + 1) + index[:, 1]))
+    try:
+        hull_area = float(ConvexHull(local_xy).volume)       # in 2D, .volume is the area
+    except Exception:                                         # all points on a line
+        return 1.0
+    total = max(hull_area / (cell * cell), float(occupied))
+    return min(1.0, float(occupied) / total)
+
+
+def narrowest_width(local_xy):
+    """Width of the narrowest strip that holds all points of a site (metres).
+    local_xy: (n, 2) positions in the plane of the site. The value does not depend
+    on how the site is turned in its plane: a square of side L gives L (the long
+    and short axes of a square are not defined, so an axis-based width would give
+    up to 1.4 L). A line gives its thickness."""
+    from scipy.spatial import ConvexHull
+    if len(local_xy) < 3:
+        return 0.0
+    try:
+        hull = local_xy[ConvexHull(local_xy).vertices]
+    except Exception:                                         # all points on a line
+        return 0.0
+    edges = np.roll(hull, -1, axis=0) - hull
+    length = np.linalg.norm(edges, axis=1)
+    keep = length > 0
+    edges, length = edges[keep], length[keep]
+    normals = np.column_stack([-edges[:, 1], edges[:, 0]]) / length[:, None]
+    spread = hull @ normals.T                                 # (vertices, edges)
+    return float((spread.max(axis=0) - spread.min(axis=0)).min())
+
+
+def site_size_filter(xyz, cluster_id, clusters, min_width, min_area, min_fill):
+    """
+    Keeps the damage sites that are large enough and well filled.
+
+    Why: the false sites of a SLAM map are mostly small (a few centimetres wide)
+    or thin (a line along an edge or a band of smooth offset). A real damage that
+    is worth a report has a size. A limit in metres does not depend on the point
+    spacing, and a limit on the share of filled cells does not either.
+
+    xyz: the core points. cluster_id: one integer for each core point (-1 = no
+    site). clusters: the site records (each has "cluster_id"). Only the measured
+    sites are tested: a record with no "type", or with the type "added", "removed"
+    or "changed". Holes and unmatched sites have their own limits and are kept.
+    min_width: the short side of the site, in the plane of the site, in metres.
+    min_area: the area of the outline of the site, in square metres.
+    min_fill: the share of filled cells (see site_fill_fraction). A value of 0
+    switches a limit off.
+
+    Returns (new_cluster_id, new_clusters, rejected, n_rejected_points). The ids
+    of the kept sites are 0, 1, 2, ... in the old order. The kept records get the
+    keys "width", "height", "area" and "fill" of the site. A rejected record has
+    the old id, "centroid", "point_count", the same four numbers and "reasons".
+    """
+    new_cluster_id = np.full(len(cluster_id), -1, dtype=np.int64)
+    kept, rejected = [], []
+    n_rejected_points = 0
+    for record in clusters:
+        members = np.where(cluster_id == record["cluster_id"])[0]
+        if record.get("type", "changed") not in ("added", "removed", "changed") \
+                or not len(members):
+            new_id = len(kept)
+            new_cluster_id[members] = new_id
+            kept.append({**record, "cluster_id": new_id})
+            continue
+        width, height, _t, area, _p, center, basis = measure_cluster(xyz[members])
+        local = ((xyz[members] - center) @ basis.T)[:, :2]
+        fill = site_fill_fraction(local)
+        short_side = narrowest_width(local)
+        reasons = []
+        if min_width > 0 and short_side < min_width:
+            reasons.append(f"short side {short_side * 100:.1f} cm < {min_width * 100:.1f} cm")
+        if min_area > 0 and area < min_area:
+            reasons.append(f"area {area * 1e4:.0f} cm2 < {min_area * 1e4:.0f} cm2")
+        if min_fill > 0 and fill < min_fill:
+            reasons.append(f"fill {fill:.2f} < {min_fill:.2f}")
+        numbers = {"width": round(width, 4), "height": round(height, 4),
+                   "short_side": round(short_side, 4), "area": round(area, 5), "fill": round(fill, 3)}
+        if reasons:
+            n_rejected_points += len(members)
+            rejected.append({"cluster_id": record["cluster_id"],
+                             "centroid": record["centroid"],
+                             "point_count": record["point_count"], **numbers,
+                             "reasons": reasons})
+        else:
+            new_id = len(kept)
+            new_cluster_id[members] = new_id
+            kept.append({**record, "cluster_id": new_id, **numbers})
+    return new_cluster_id, kept, rejected, n_rejected_points
+
+
+def normal_flatness(normals, tilt_deg=20.0):
+    """
+    The share (0 to 1) of the normals that are within `tilt_deg` degrees of
+    the main normal of the group. The sign of a normal does not count
+    (CloudCompare gives each normal an arbitrary sign).
+
+    Why: the points of a damage site on a flat wall, floor or ceiling have
+    nearly one normal direction. A false site along a join of two surfaces
+    (wall and floor, wall and ceiling, a corner) holds two or three directions,
+    so its share is low. Returns None when fewer than 3 normals are finite.
+    """
+    n = np.asarray(normals, dtype=np.float64)
+    n = n[np.all(np.isfinite(n), axis=1)]
+    if len(n) < 3:
+        return None
+    length = np.linalg.norm(n, axis=1)
+    n = n[length > 1e-9] / length[length > 1e-9][:, None]
+    if len(n) < 3:
+        return None
+    _w, vectors = np.linalg.eigh(n.T @ n)
+    main = vectors[:, -1]
+    angle = np.degrees(np.arccos(np.clip(np.abs(n @ main), 0.0, 1.0)))
+    return float(np.mean(angle <= tilt_deg))
+
+
+def site_shape_filter(xyz, normals, cluster_id, clusters, min_flatness, max_aspect,
+                      tilt_deg=20.0):
+    """
+    Keeps the damage sites that have the shape of a damage on one surface.
+
+    Two tests (a value of 0 switches a test off):
+      min_flatness: the share of the points of the site whose normal is within
+        `tilt_deg` degrees of the main normal of the site (see normal_flatness).
+        A site that lies on a join of two surfaces has a low share.
+      max_aspect: the long side divided by the short side of the site (both in
+        the plane of the site). A strip along the foot of a wall is much longer
+        than it is wide.
+
+    Only the measured sites are tested (type "added", "removed" or "changed", or
+    no type). Holes and unmatched sites are kept.
+    normals: one row (nx, ny, nz) for each core point, or None (then the
+    flatness test is not made).
+
+    Returns (new_cluster_id, new_clusters, rejected, n_rejected_points) like
+    site_size_filter. A kept record gets the keys "flatness" and "aspect" (a
+    number, or None when it could not be found). A rejected record has the old
+    id, "centroid", "point_count", the two numbers and "reasons".
+    """
+    new_cluster_id = np.full(len(cluster_id), -1, dtype=np.int64)
+    kept, rejected = [], []
+    n_rejected_points = 0
+    for record in clusters:
+        members = np.where(cluster_id == record["cluster_id"])[0]
+        if record.get("type", "changed") not in ("added", "removed", "changed") \
+                or not len(members):
+            new_id = len(kept)
+            new_cluster_id[members] = new_id
+            kept.append({**record, "cluster_id": new_id})
+            continue
+        width, height, _t, _a, _p, _c, _b = measure_cluster(xyz[members])
+        short, long_ = min(width, height), max(width, height)
+        aspect = (long_ / short) if short > 1e-6 else float("inf")
+        flatness = None
+        if normals is not None and min_flatness > 0:
+            flatness = normal_flatness(normals[members], tilt_deg)
+        reasons = []
+        if max_aspect > 0 and aspect > max_aspect:
+            reasons.append(f"long side is {aspect:.1f} times the short side (limit {max_aspect:g})")
+        if min_flatness > 0 and flatness is not None and flatness < min_flatness:
+            reasons.append(f"normal share {flatness:.2f} < {min_flatness:.2f} "
+                           f"(the site lies on more than one surface)")
+        numbers = {"flatness": None if flatness is None else round(flatness, 3),
+                   "aspect": round(aspect, 2) if np.isfinite(aspect) else None}
+        if reasons:
+            n_rejected_points += len(members)
+            rejected.append({"cluster_id": record["cluster_id"],
+                             "centroid": record["centroid"],
+                             "point_count": record["point_count"], **numbers,
+                             "reasons": reasons})
+        else:
+            new_id = len(kept)
+            new_cluster_id[members] = new_id
+            kept.append({**record, "cluster_id": new_id, **numbers})
+    return new_cluster_id, kept, rejected, n_rejected_points
+
+
+def unmatched_support_filter(xyz, labels, records, significant, valid, count2,
+                             min_empty_share, min_changed_share, tree=None):
+    """
+    Keeps the "unmatched" sites that have a reason to be a real change.
+
+    An unmatched site is a patch where the core points have no M3C2 distance but
+    are not empty like a hole. Such a patch has two kinds of cause:
+      - A real change: the surface moved by more than the M3C2 search depth, or
+        it is not there in the second scan. Then the second scan has no points
+        near the core points, or the valid core points around the patch show a
+        significant change (the moved object has other faces).
+      - A weak second scan on a surface that did not change (grazing angle, a
+        join of surfaces): the second scan still has points, and the valid core
+        points around the patch show no change.
+    A site is kept when at least one of these is true:
+      1. At least `min_empty_share` of its points have 0 points of the second
+         scan in the M3C2 cylinder (`count2` is the count field; None = this test
+         is not made).
+      2. At least `min_changed_share` of the valid core points around it (within
+         its radius + 5 cm, not its own points) have a significant change (Step A).
+    Returns (new_labels, new_records, rejected). The labels and records are
+    numbered again from 0 in the old order. A kept or rejected record gets
+    "empty_share" and "changed_share" (the share, or None when it could not be
+    found).
+    """
+    from scipy.spatial import cKDTree
+    if tree is None:
+        tree = cKDTree(xyz)
+    new_labels = np.full(len(labels), -1, dtype=np.int64)
+    kept, rejected = [], []
+    for number, record in enumerate(records):
+        members = np.where(labels == number)[0]
+        empty_share = None
+        if count2 is not None and len(members):
+            empty_share = float(np.mean(np.asarray(count2)[members] == 0))
+        radius = 0.5 * max(record.get("width", 0.0), record.get("height", 0.0)) + 0.05
+        near = np.asarray(tree.query_ball_point(np.asarray(record["centroid"]), radius), dtype=np.int64)
+        near = near[(labels[near] != number) & valid[near]]
+        changed_share = float(np.mean(significant[near])) if len(near) >= 20 else None
+        support = []
+        if empty_share is not None and empty_share >= min_empty_share:
+            support.append("empty")
+        if changed_share is not None and changed_share >= min_changed_share:
+            support.append("changed")
+        numbers = {"empty_share": None if empty_share is None else round(empty_share, 3),
+                   "changed_share": None if changed_share is None else round(changed_share, 3)}
+        if support:
+            new_labels[members] = len(kept)
+            kept.append({**record, **numbers})
+        else:
+            rejected.append({"centroid": record["centroid"],
+                             "point_count": record["point_count"], **numbers,
+                             "reasons": ["the second scan has points here and the valid points "
+                                         "around the site show no change"]})
+    return new_labels, kept, rejected
+
+
+# The values of 'auto' for the clustering. They come from the runs that were
+# checked against the true damage (a core spacing of 3 cm: radius 8 cm, 4
+# neighbours, smallest cluster 8) and are written as shares of the number of
+# core points in the radius, so they follow the core spacing.
+AUTO_EPS_FACTOR = 2.7          # radius = this x the median core spacing ...
+AUTO_EPS_MIN, AUTO_EPS_MAX = 0.05, 0.08      # ... but between these two values (m)
+AUTO_SAMPLES_SHARE = 0.29      # neighbours needed = this x the core points in the radius
+AUTO_CLUSTER_SHARE = 0.57      # smallest cluster = this x the core points in the radius
+
+
+def auto_cluster_settings(xyz, sample=3000, seed=0):
+    """
+    Finds the clustering values from the spacing of the core points.
+
+    Returns a dict: spacing (median distance to the nearest other core point,
+    m), eps (m), neighbours (the median number of core points in the radius,
+    the point itself included), min_samples and min_cluster_size.
+    Needs scipy.
+    """
+    from scipy.spatial import cKDTree
+    xyz = np.asarray(xyz, dtype=np.float64)
+    tree = cKDTree(xyz)
+    rng = np.random.default_rng(seed)
+    pick = rng.choice(len(xyz), min(len(xyz), sample), replace=False)
+    distance, _ = tree.query(xyz[pick], k=2)
+    spacing = float(np.median(distance[:, 1]))
+    eps = float(np.clip(AUTO_EPS_FACTOR * spacing, AUTO_EPS_MIN, AUTO_EPS_MAX))
+    counts = tree.query_ball_point(xyz[pick], eps, return_length=True)
+    neighbours = float(np.median(counts))
+    return {"spacing": spacing, "eps": eps, "neighbours": neighbours,
+            "min_samples": max(4, int(round(AUTO_SAMPLES_SHARE * neighbours))),
+            "min_cluster_size": max(4, int(round(AUTO_CLUSTER_SHARE * neighbours)))}
+
+
+def _float_or_auto(text):
+    """argparse type: a number, or the word 'auto'."""
+    if str(text).strip().lower() == "auto":
+        return "auto"
+    try:
+        return float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{text}' is not a number or 'auto'")
+
+
+def _int_or_auto(text):
+    """argparse type: a whole number, or the word 'auto'."""
+    if str(text).strip().lower() == "auto":
+        return "auto"
+    try:
+        return int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{text}' is not a whole number or 'auto'")
+
+
+def read_confirmed_points(path):
+    """The x, y, z of the points with cluster_id >= 0 in a Stage 6 output file."""
+    vertex = PlyData.read(str(path))["vertex"]
+    if "cluster_id" not in (vertex.data.dtype.names or ()):
+        return np.zeros((0, 3))
+    member = np.asarray(vertex["cluster_id"]) >= 0
+    return np.column_stack([np.asarray(vertex[c], dtype=np.float64)[member]
+                            for c in ("x", "y", "z")])
+
+
+def second_run_points(args, other_file):
+    """
+    Runs this script on `other_file` (the second M3C2 result) with the same
+    thresholds, uncertainty, background and clustering settings as this run, in a
+    temporary folder, and returns the points of its damage sites (n x 3).
+    Returns None and prints the reason when the run fails.
+    """
+    command = [sys.executable, str(Path(__file__).resolve()),
+               "--input", str(other_file), "--keep-all", "--cluster-method", args.cluster_method,
+               "--cluster-eps", str(args.cluster_eps),
+               "--cluster-min-samples", str(args.cluster_min_samples),
+               "--min-cluster-size", str(args.min_cluster_size)]
+    if args.threshold is not None:
+        command += ["--threshold", str(args.threshold)]
+    if args.use_uncertainty:
+        command.append("--use-uncertainty")
+        if args.registration_error is not None:
+            command += ["--registration-error", str(args.registration_error)]
+            if args.registration_error_was is not None:
+                command += ["--registration-error-was", str(args.registration_error_was)]
+    if args.remove_background is not None:
+        command += ["--remove-background", str(args.remove_background)]
+    # The size limits (--min-site-*) are NOT passed on. At the other scale the same
+    # damage can split into smaller parts. The second run must find all it can.
+    with tempfile.TemporaryDirectory() as folder:
+        out = Path(folder) / "second_run.ply"
+        result = subprocess.run(command + ["--output", str(out)],
+                                capture_output=True, text=True)
+        if result.returncode != 0 or not out.exists():
+            print("ERROR: the run on the second file (--persist-with) failed:")
+            print((result.stdout + result.stderr).strip()[-1500:])
+            return None
+        return read_confirmed_points(out)
+
+
+def robust_sigma(distances):
+    """1.4826 x MAD about the median of the finite values, or None when there
+    are fewer than 100 finite values. The same number as the 'robust_sigma' of
+    Stage 5 (pipeline_core.robust_m3c2_spread)."""
+    valid = distances[np.isfinite(distances)]
+    if valid.size < 100:
+        return None
+    median = float(np.median(valid))
+    return float(1.4826 * np.median(np.abs(valid - median)))
+
+
+REGISTRATION_ERROR_MIN = 0.002      # m. The lowest value that 'auto' gives.
+
+
+def rebase_registration_error(uncertainty, distances, requested, was):
+    """Changes the registration part of the uncertainty field.
+
+    CloudCompare writes uncertainty = 1.96 x (local roughness + registration
+    error). With the registration error that Stage 5 used (`was`) and a new
+    one (`new`), the new field is  uncertainty - 1.96 x (was - new). It never
+    goes below 1.96 x new (the local roughness cannot be negative).
+
+    requested: 'auto' (the robust spread of the distances, at least
+    REGISTRATION_ERROR_MIN) or a number in metres. Returns (uncertainty,
+    new). `new` is None, and the field is returned unchanged, when the change
+    cannot be made (no `was`, no number, too few distances). The reason is
+    printed."""
+    if was is None:
+        print("  NOTE: --registration-error needs --registration-error-was (the "
+              "registration error of the Stage 5 run). The uncertainty field is not changed.")
+        return uncertainty, None
+    if str(requested).strip().lower() == "auto":
+        sigma = robust_sigma(distances)
+        if sigma is None:
+            print("  NOTE: fewer than 100 valid distances, so the spread cannot be measured. "
+                  "The uncertainty field is not changed.")
+            return uncertainty, None
+        new = max(sigma, REGISTRATION_ERROR_MIN)
+        how = f"the robust spread of the distances ({sigma * 100:.2f} cm)"
+    else:
+        try:
+            new = float(requested)
+        except ValueError:
+            print(f"  NOTE: --registration-error '{requested}' is not a number or 'auto'. "
+                  f"The uncertainty field is not changed.")
+            return uncertainty, None
+        if new < 0:
+            print("  NOTE: --registration-error must not be negative. The uncertainty field "
+                  "is not changed.")
+            return uncertainty, None
+        how = "the value that was given"
+    finite = np.isfinite(uncertainty)
+    before = float(np.median(uncertainty[finite])) if finite.any() else float("nan")
+    changed = np.where(finite, np.maximum(uncertainty - 1.96 * (was - new), 1.96 * new),
+                       uncertainty)
+    after = float(np.median(changed[finite])) if finite.any() else float("nan")
+    print(f"  Registration error: {was * 100:.2f} cm (Stage 5) -> {new * 100:.2f} cm ({how}).")
+    print(f"  Median uncertainty (LOD95): {before * 100:.2f} cm -> {after * 100:.2f} cm.")
+    return changed, new
 
 
 def cluster_flagged_points(points, method, eps, min_samples, min_cluster_size):
@@ -485,7 +1105,12 @@ def measure_cluster(points):
     Returns width (long side), height (short side), thickness (off the
     plane), area, perimeter, centre and the plane basis."""
     center = points.mean(axis=0)
-    _, _, vt = np.linalg.svd(points - center, full_matrices=False)
+    # A cluster with fewer than 3 points (a NaN group of 1 or 2 points) needs
+    # full_matrices=True to give a 3 x 3 basis. With False the basis has fewer than
+    # 3 rows and extent[2] raises IndexError (update 23). With 3 points or more,
+    # full_matrices=False gives the same 3 x 3 basis. True would make an n x n
+    # matrix: 12 GB for a cluster of 40 000 points (found 2026-10-17).
+    _, _, vt = np.linalg.svd(points - center, full_matrices=len(points) < 3)
     local = (points - center) @ vt.T
     extent = local.max(axis=0) - local.min(axis=0)
     area = float(extent[0] * extent[1])
@@ -671,6 +1296,122 @@ def main():
                               "per-point floor). Requires an uncertainty field in "
                               "--input - CloudCompare writes one automatically for any "
                               "M3C2 run.")
+    parser.add_argument("--remove-background", type=float, default=None, metavar="R",
+                         help="Subtract the smooth part of the M3C2 distances before the "
+                              "tests. R is a radius in metres (for example 0.5). For every "
+                              "core point the background is the median of the distances of "
+                              "the core points within R on the same surface. A smooth "
+                              "offset between two scans (SLAM drift) is as large as a small "
+                              "damage, and it hides the damage or makes false sites. A "
+                              "damage with sharp edges stays. A damage that covers more than "
+                              "half of the circle of radius R is removed with the "
+                              "background, so use an R that is larger than the largest "
+                              "damage. Needs the normals (nx, ny, nz) in the input file. "
+                              "The output file gets the field 'background' (metres). With "
+                              "--registration-error auto, the spread is measured after the "
+                              "background is removed. Default: off")
+    parser.add_argument("--density-drop", type=float, default=None, metavar="R",
+                         help="With --find-holes: also treat a core point as 'no data' when "
+                              "the point count of the second scan in its projection cylinder "
+                              "is less than R times the (median-scaled) count of the first "
+                              "scan, for example 0.25. A hole in the second scan can still "
+                              "give a distance when the cylinder reaches the points around "
+                              "the hole. The drop in the count shows these holes. Needs the "
+                              "two count fields that CloudCompare writes when the M3C2 "
+                              "parameter ExportDensityAtProjScale is true (Stage 5 sets it "
+                              "since update 23). Without the fields, this option does "
+                              "nothing and prints a note. Default: off")
+    parser.add_argument("--density-fields", nargs=2, metavar=("CLOUD1", "CLOUD2"), default=None,
+                         help="The names of the two count fields (cloud 1, cloud 2) when "
+                              "--density-drop cannot find them by itself.")
+    parser.add_argument("--density-min-points", type=int, default=20, metavar="N",
+                         help="--density-drop tests only core points with at least N points "
+                              "of the first scan in the cylinder. Default: 20")
+    parser.add_argument("--min-site-width", type=float, default=0.0, metavar="M",
+                         help="Remove a measured damage site (added, removed or changed) "
+                              "when its SHORT side, in the plane of the site, is smaller "
+                              "than this (metres). The false sites of a SLAM map are often "
+                              "thin lines along an edge or small patches. A limit in metres "
+                              "does not depend on the point spacing. Holes and unmatched "
+                              "sites are not tested. 0 = off (the old behaviour). "
+                              "Default: 0")
+    parser.add_argument("--min-site-area", type=float, default=0.0, metavar="M2",
+                         help="Remove a measured damage site when the area of its outline "
+                              "is smaller than this (square metres). 0 = off. Default: 0")
+    parser.add_argument("--min-site-fill", type=float, default=0.0, metavar="S",
+                         help="Remove a measured damage site when less than this share "
+                              "(0 to 1) of the cells of a grid over the site hold a point. "
+                              "The cell size is 2 times the median point spacing of the "
+                              "site, so the number does not depend on the point spacing. "
+                              "A thin or ring-like false site has a low share. 0 = off. "
+                              "Default: 0")
+    parser.add_argument("--min-site-flatness", type=float, default=0.0, metavar="S",
+                         help="Remove a measured damage site when less than this share (0 to "
+                              "1) of its points have a normal within 20 degrees of the main "
+                              "normal of the site. A site on a join of two surfaces (wall and "
+                              "floor, wall and ceiling, a corner) has several normal "
+                              "directions and a low share. A damage on one flat surface has a "
+                              "high share (a smooth dent or bulge gives about 0.65). Needs "
+                              "the normals (nx, ny, nz). Holes and unmatched sites are not "
+                              "tested. 0 = off. Default: 0")
+    parser.add_argument("--max-site-aspect", type=float, default=0.0, metavar="R",
+                         help="Remove a measured damage site when its long side is more than "
+                              "R times its short side. A strip along the foot of a wall is "
+                              "much longer than it is wide. 0 = off. Default: 0")
+    parser.add_argument("--unmatched-support", action="store_true",
+                         help="With --find-holes: keep an 'unmatched' site only when it has "
+                              "a reason to be a real change: at least "
+                              "--unmatched-empty-share of its points have no point of the "
+                              "second scan in the M3C2 cylinder, or at least "
+                              "--unmatched-changed-share of the valid core points around it "
+                              "show a significant change. A site where the second scan has "
+                              "points and the valid points around it show no change is a "
+                              "weak second scan on a surface that did not change (grazing "
+                              "angle, a join of surfaces). Off by default.")
+    parser.add_argument("--unmatched-empty-share", type=float, default=0.25, metavar="S",
+                         help="--unmatched-support: the smallest share of the points of the "
+                              "site with 0 points of the second scan in the cylinder. "
+                              "Default: 0.25")
+    parser.add_argument("--unmatched-changed-share", type=float, default=0.5, metavar="S",
+                         help="--unmatched-support: the smallest share of the valid core "
+                              "points around the site with a significant change. "
+                              "Default: 0.5")
+    parser.add_argument("--persist-with", default=None, metavar="FILE",
+                         help="A second M3C2 result of the SAME pair of scans, made with another "
+                              "Normal scale (for example half of the first). Stage 6 runs on "
+                              "this file too, with the same settings, and keeps a damage site "
+                              "only if the second run also finds it. A site that comes from the "
+                              "scale of one run (a smooth offset between the scans, noise on a "
+                              "curved surface) changes with the scale, and real damage does "
+                              "not. On the simulated SLAM maps this rejected about 40 %% of the "
+                              "false sites and no damage. Holes and unmatched sites are not "
+                              "tested. Needs scipy. The registration error of the second "
+                              "file is taken as the same as the first (see "
+                              "--registration-error-was). Default: off")
+    parser.add_argument("--persist-distance", type=float, default=0.10, metavar="M",
+                         help="--persist-with: how near (metres) a point of the second run must "
+                              "be to a point of the site. Default: 0.10")
+    parser.add_argument("--persist-share", type=float, default=0.5, metavar="S",
+                         help="--persist-with: the share (0 to 1) of the points of a site that "
+                              "need a point of the second run within --persist-distance. "
+                              "Default: 0.5")
+    parser.add_argument("--registration-error", default=None, metavar="M|auto",
+                         help="[with --use-uncertainty] Replace the registration error that "
+                              "Stage 5 put into the uncertainty field. A number is in metres. "
+                              "'auto' is the robust spread (1.4826 x MAD about the median, "
+                              "at least 0.2 cm) of the M3C2 distances of the input file. The "
+                              "uncertainty field is 1.96 x (local roughness + registration "
+                              "error), so only the registration part changes. This gives the "
+                              "same result as a second Stage 5 run with the new registration "
+                              "error, without CloudCompare. The ICP RMS of Stage 3 is often "
+                              "much larger than the spread of the M3C2 distances, and a "
+                              "registration error that is too large hides small damage. "
+                              "Needs --registration-error-was. Default: off")
+    parser.add_argument("--registration-error-was", type=float, default=None, metavar="M",
+                         help="The registration error (metres) that the Stage 5 run used (the "
+                              "RegistrationError line of its M3C2 params file). Needed by "
+                              "--registration-error. Without it the uncertainty field is not "
+                              "changed.")
     parser.add_argument("--keep-all", action="store_true",
                          help="Don't drop below-threshold or below-cluster points - "
                               "instead keep everything and add 'classified' (Step A: "
@@ -692,19 +1433,29 @@ def main():
                               "variable density automatically, worth trying if flagged-"
                               "point density varies a lot by surface angle/distance "
                               "from scanner. Default: dbscan")
-    parser.add_argument("--cluster-eps", type=float, default=0.05,
+    parser.add_argument("--cluster-eps", type=_float_or_auto, default=0.05,
                          help="[cluster, dbscan only] Max gap (meters) between flagged "
                               "points to still count as the same damage site. M3C2 core "
                               "point spacing is usually finer than a plane-segmentation "
                               "cloud's, so this defaults tighter than segment_planes.py's "
                               "--cluster-eps (0.15) - check core point spacing "
                               "(point_spacing.py) if sites are splitting or merging "
-                              "unexpectedly. Default: 0.05")
-    parser.add_argument("--cluster-min-samples", type=int, default=4,
+                              "unexpectedly. 'auto' = find it from the spacing of the core "
+                              "points (see the note under --cluster-min-samples). "
+                              "Default: 0.05")
+    parser.add_argument("--cluster-min-samples", type=_int_or_auto, default=4,
                          help="[cluster] DBSCAN/HDBSCAN's density parameter: how many "
                               "flagged neighbors (within --cluster-eps, for dbscan) a "
-                              "point needs to seed a cluster at all. Default: 4")
-    parser.add_argument("--min-cluster-size", type=int, default=4,
+                              "point needs to seed a cluster at all. 'auto' = find it from "
+                              "the spacing of the core points: the radius is 2.7 times the "
+                              "median core spacing (between 4 and 8 cm), the neighbours are "
+                              "29 %% of the core points inside that radius (at least 4), and "
+                              "the smallest cluster is 57 %% of them (at least 4). For a core "
+                              "spacing of 3 cm this gives 8 cm, 4 and 8, the values that were "
+                              "checked against true damage. A fixed value does not follow the "
+                              "spacing: 2 cm and 50 neighbours find nothing in a cloud with a "
+                              "5 mm spacing. 'auto' needs scipy. Default: 4")
+    parser.add_argument("--min-cluster-size", type=_int_or_auto, default=4,
                          help="[cluster] A cluster's own tunable size floor, separate "
                               "from --cluster-min-samples - e.g. 'require at least 4 "
                               "flagged points total to count as a real site,' an "
@@ -712,7 +1463,7 @@ def main():
                               "whatever --cluster-min-samples produced. Clusters "
                               "smaller than this are folded into noise (cluster_id=-1) "
                               "and dropped by Step C, same as any other noise point. "
-                              "Default: 4")
+                              "'auto' = see --cluster-min-samples. Default: 4")
 
     holes = parser.add_argument_group(
         "holes and direction of change",
@@ -773,6 +1524,14 @@ def main():
     holes.add_argument("--min-unmatched-fill", type=float, default=0.05,
                        help="Smallest fill share (0 to 1) of an 'unmatched' site. A cluster "
                             "below this share is rejected. Default: 0.05")
+    holes.add_argument("--label-noise", action="store_true",
+                       help="With --find-holes: give change_type 1 (added) or 2 (removed) "
+                            "to EVERY flagged point, also the points that the clustering or "
+                            "a site limit rejected (the behaviour before update 23). By "
+                            "default only the points of a kept damage site have change_type "
+                            "1 or 2, and all other points have 0. cluster_id is not "
+                            "changed. Without clustering, all flagged points keep their "
+                            "type.")
     holes.add_argument("--hole-value", type=float, default=0.10,
                        help="Value (m) that change_inward shows for the points of a hole. "
                             "It is for display only (colour scales). Default: 0.10")
@@ -782,6 +1541,30 @@ def main():
         parser.error("--threshold is required unless --use-uncertainty is given.")
     if args.find_holes and not args.cluster:
         parser.error("--find-holes needs clustering. Do not use it with --no-cluster.")
+    if args.min_site_width < 0 or args.min_site_area < 0:
+        parser.error("--min-site-width and --min-site-area must not be negative.")
+    if not 0.0 <= args.min_site_fill <= 1.0:
+        parser.error("--min-site-fill must be between 0 and 1.")
+    if not 0.0 <= args.min_site_flatness <= 1.0:
+        parser.error("--min-site-flatness must be between 0 and 1.")
+    if args.max_site_aspect < 0:
+        parser.error("--max-site-aspect must not be negative.")
+    if args.unmatched_support and not args.find_holes:
+        parser.error("--unmatched-support needs --find-holes.")
+    if not (0.0 <= args.unmatched_empty_share <= 1.0
+            and 0.0 <= args.unmatched_changed_share <= 1.0):
+        parser.error("--unmatched-empty-share and --unmatched-changed-share must be "
+                     "between 0 and 1.")
+    for _name, _value in (("--cluster-eps", args.cluster_eps),
+                          ("--cluster-min-samples", args.cluster_min_samples),
+                          ("--min-cluster-size", args.min_cluster_size)):
+        if _value != "auto" and _value < 0:
+            parser.error(f"{_name} must not be negative.")
+    if args.persist_with:
+        if not 0.0 <= args.persist_share <= 1.0:
+            parser.error("--persist-share must be between 0 and 1.")
+        if args.persist_distance <= 0:
+            parser.error("--persist-distance must be larger than 0.")
 
     print(f"Reading: {args.input}")
     ply = PlyData.read(args.input)
@@ -803,10 +1586,44 @@ def main():
     distances = np.asarray(vertex[field_name], dtype=np.float64)
     finite_mask = np.isfinite(distances)
     n_total = len(distances)
+    n_density_low = None
+    if args.density_drop is not None:
+        if not args.find_holes:
+            print("  NOTE: --density-drop works only with --find-holes. The option is ignored.")
+        elif not (0.0 < args.density_drop < 1.0):
+            parser.error("--density-drop must be larger than 0 and smaller than 1.")
+        else:
+            names = vertex.data.dtype.names or ()
+            pair = tuple(args.density_fields) if args.density_fields else \
+                find_density_fields(names)
+            if pair is None or pair[0] not in names or pair[1] not in names:
+                print("  NOTE: --density-drop needs the two point-count fields of M3C2 "
+                      "(ExportDensityAtProjScale=true), and the file has no such pair. "
+                      f"Fields in the file: {list(names)}. Use --density-fields to name "
+                      "them. The option is ignored.")
+            else:
+                low, median_ratio, n_tested = density_drop_mask(
+                    vertex[pair[0]], vertex[pair[1]], args.density_drop, args.density_min_points)
+                if median_ratio is None:
+                    print(f"  NOTE: --density-drop: too few core points have {args.density_min_points} "
+                          "or more points in the cylinder. The option is ignored.")
+                else:
+                    low &= finite_mask
+                    n_density_low = int(low.sum())
+                    print(f"  Density drop (fields '{pair[0]}' and '{pair[1]}'): the median "
+                          f"ratio of the counts is {median_ratio:.2f}. {n_density_low} of "
+                          f"{n_tested} tested core points have a count of cloud 2 below "
+                          f"{args.density_drop:g} times the median ratio. They are treated as "
+                          "points without a distance.")
+                    distances = np.where(low, np.nan, distances)
+                    finite_mask = np.isfinite(distances)
     n_invalid = int((~finite_mask).sum())
     if n_invalid:
-        print(f"  Note: {n_invalid} points had no valid M3C2 distance (outside "
-              f"max distance / insufficient neighbors) and are treated as unchanged"
+        print(f"  Note: {n_invalid} points had no valid M3C2 distance"
+              + (f" ({n_density_low} of them from the density drop; the others are outside "
+                 f"max distance / insufficient neighbors)" if n_density_low else
+                 " (outside max distance / insufficient neighbors)")
+              + " and are treated as unchanged"
               + (" by Step A. --find-holes checks them below." if args.find_holes else "."))
 
     finite_distances = distances[finite_mask]
@@ -833,6 +1650,41 @@ def main():
             print("  WARNING: the selected uncertainty field has negative values - a "
                   "real uncertainty/magnitude field should never be negative. Double "
                   "check 'Uncertainty field' above against what you expect.")
+
+    background = None
+    if args.remove_background is not None:
+        names = vertex.data.dtype.names or ()
+        if not all(c in names for c in ("nx", "ny", "nz")):
+            print("  NOTE: --remove-background needs the normals (nx, ny, nz) in the input "
+                  "file, and the file has none. The distances are not changed.")
+        elif args.remove_background <= 0:
+            parser.error("--remove-background must be larger than 0.")
+        else:
+            xyz_bg = np.column_stack([np.asarray(vertex[c], dtype=np.float64)
+                                      for c in ("x", "y", "z")])
+            normals_bg = np.column_stack([np.asarray(vertex[c], dtype=np.float64)
+                                          for c in ("nx", "ny", "nz")])
+            try:
+                background = estimate_background(xyz_bg, normals_bg, distances,
+                                                 args.remove_background)
+            except ImportError as e:
+                print(f"ERROR: --remove-background needs scipy ({e}). Run: pip install scipy")
+                return 1
+            before = robust_sigma(distances)
+            distances = distances - background
+            after = robust_sigma(distances)
+            moved = np.abs(background[finite_mask])
+            print(f"  Background removed (radius {args.remove_background * 100:.0f} cm): "
+                  f"median |background| {np.median(moved) * 100:.2f} cm, "
+                  f"95 % below {np.percentile(moved, 95) * 100:.2f} cm.")
+            if before is not None and after is not None:
+                print(f"  Spread of the distances: {before * 100:.2f} cm -> {after * 100:.2f} cm.")
+            del xyz_bg, normals_bg
+
+    registration_error_used = None
+    if args.use_uncertainty and args.registration_error is not None:
+        uncertainty, registration_error_used = rebase_registration_error(
+            uncertainty, distances, args.registration_error, args.registration_error_was)
 
     # --- Step A: magnitude threshold --------------------------------------
     if args.use_uncertainty:
@@ -868,6 +1720,35 @@ def main():
                   "significantly, or --threshold is set too high for this scan.")
 
     xyz = np.column_stack([np.asarray(vertex[c], dtype=np.float64) for c in ("x", "y", "z")])
+
+    # --- 'auto' clustering values: from the spacing of the core points ------
+    cluster_auto = None
+    if "auto" in (args.cluster_eps, args.cluster_min_samples, args.min_cluster_size):
+        if not args.cluster:
+            args.cluster_eps = 0.05 if args.cluster_eps == "auto" else args.cluster_eps
+            args.cluster_min_samples = 4 if args.cluster_min_samples == "auto" \
+                else args.cluster_min_samples
+            args.min_cluster_size = 4 if args.min_cluster_size == "auto" else args.min_cluster_size
+        else:
+            try:
+                cluster_auto = auto_cluster_settings(xyz)
+            except ImportError as e:
+                print(f"ERROR: 'auto' needs scipy ({e}). Run: pip install scipy")
+                return 1
+            used = []
+            if args.cluster_eps == "auto":
+                args.cluster_eps = cluster_auto["eps"]
+                used.append(f"radius {args.cluster_eps * 100:.1f} cm")
+            if args.cluster_min_samples == "auto":
+                args.cluster_min_samples = cluster_auto["min_samples"]
+                used.append(f"neighbours {args.cluster_min_samples}")
+            if args.min_cluster_size == "auto":
+                args.min_cluster_size = cluster_auto["min_cluster_size"]
+                used.append(f"smallest cluster {args.min_cluster_size}")
+            print(f"\nClustering values 'auto': the median core spacing is "
+                  f"{cluster_auto['spacing'] * 1000:.1f} mm, and a radius of "
+                  f"{cluster_auto['eps'] * 100:.1f} cm holds {cluster_auto['neighbours']:.0f} core "
+                  f"points. Used: {', '.join(used)}.")
 
     # --- Direction of change (--find-holes): added or removed ------------
     change_inward = None
@@ -972,10 +1853,119 @@ def main():
     elif args.cluster and n_significant == 0:
         print("\nSkipping clustering: no points passed Step A.")
 
+    # --- Size and fill limits (--min-site-width/-area/-fill) -----------------
+    size_rejected = []
+    n_size_rejected_points = 0
+    size_filter_on = (args.min_site_width > 0 or args.min_site_area > 0
+                      or args.min_site_fill > 0)
+    if size_filter_on:
+        if not args.cluster:
+            print("\nNOTE: the size limits need clustering. The options are ignored.")
+            size_filter_on = False
+        elif clusters_summary:
+            try:
+                cluster_id, clusters_summary, size_rejected, n_size_rejected_points = \
+                    site_size_filter(xyz, cluster_id, clusters_summary, args.min_site_width,
+                                     args.min_site_area, args.min_site_fill)
+            except ImportError as e:
+                print(f"ERROR: the size limits need scipy ({e}). Run: pip install scipy")
+                return 1
+            n_confirmed -= n_size_rejected_points
+            print(f"\nSize limits: short side >= {args.min_site_width * 100:g} cm, "
+                  f"area >= {args.min_site_area * 1e4:g} cm2, fill >= {args.min_site_fill:g}. "
+                  f"Sites kept: {len(clusters_summary)}, rejected: {len(size_rejected)} "
+                  f"({n_size_rejected_points} points).")
+            for record in size_rejected:
+                c = ", ".join(f"{v:.2f}" for v in record["centroid"])
+                print(f"    rejected: {record['point_count']} points at ({c}): "
+                      f"{'; '.join(record['reasons'])}")
+            if args.find_holes and change_inward is not None:
+                n_added_points = int(sum(c["point_count"] for c in clusters_summary
+                                         if c.get("type") == "added"))
+                n_removed_points = int(sum(c["point_count"] for c in clusters_summary
+                                           if c.get("type") == "removed"))
+
+    # --- Shape limits (--min-site-flatness / --max-site-aspect) --------------
+    shape_rejected = []
+    n_shape_rejected_points = 0
+    shape_filter_on = args.min_site_flatness > 0 or args.max_site_aspect > 0
+    if shape_filter_on:
+        if not args.cluster:
+            print("\nNOTE: the shape limits need clustering. The options are ignored.")
+            shape_filter_on = False
+        elif clusters_summary:
+            names_ = vertex.data.dtype.names or ()
+            normals = None
+            if all(c in names_ for c in ("nx", "ny", "nz")):
+                normals = np.column_stack([np.asarray(vertex[c], dtype=np.float64)
+                                           for c in ("nx", "ny", "nz")])
+            elif args.min_site_flatness > 0:
+                print("\nNOTE: --min-site-flatness needs the normals (nx, ny, nz). The file has "
+                      "none. Only --max-site-aspect is used.")
+            cluster_id, clusters_summary, shape_rejected, n_shape_rejected_points = \
+                site_shape_filter(xyz, normals, cluster_id, clusters_summary,
+                                  args.min_site_flatness, args.max_site_aspect)
+            n_confirmed -= n_shape_rejected_points
+            limits = []
+            if args.min_site_flatness > 0 and normals is not None:
+                limits.append(f"normal share >= {args.min_site_flatness:g}")
+            if args.max_site_aspect > 0:
+                limits.append(f"long side <= {args.max_site_aspect:g} x short side")
+            print(f"\nShape limits: {', '.join(limits)}. Sites kept: {len(clusters_summary)}, "
+                  f"rejected: {len(shape_rejected)} ({n_shape_rejected_points} points).")
+            for record in shape_rejected:
+                c = ", ".join(f"{v:.2f}" for v in record["centroid"])
+                print(f"    rejected: {record['point_count']} points at ({c}): "
+                      f"{'; '.join(record['reasons'])}")
+            if args.find_holes and change_inward is not None:
+                n_added_points = int(sum(c["point_count"] for c in clusters_summary
+                                         if c.get("type") == "added"))
+                n_removed_points = int(sum(c["point_count"] for c in clusters_summary
+                                           if c.get("type") == "removed"))
+
+    # --- Persistence (--persist-with): keep the sites that a second scale also finds
+    persist_rejected = []
+    n_persist_rejected_points = 0
+    if args.persist_with:
+        if not args.cluster:
+            print("\nNOTE: --persist-with needs clustering. The option is ignored.")
+        elif not clusters_summary:
+            print("\nNOTE: --persist-with: there are no damage sites to test.")
+        else:
+            if not Path(args.persist_with).is_file():
+                print(f"ERROR: --persist-with: no such file: {args.persist_with}")
+                return 1
+            print(f"\nPersistence: running on the second file {args.persist_with} ...")
+            try:
+                other_points = second_run_points(args, args.persist_with)
+            except ImportError as e:
+                print(f"ERROR: --persist-with needs scipy ({e}). Run: pip install scipy")
+                return 1
+            if other_points is None:
+                return 1
+            cluster_id, clusters_summary, persist_rejected, n_persist_rejected_points = \
+                persistence_filter(xyz, cluster_id, clusters_summary, other_points,
+                                   args.persist_distance, args.persist_share)
+            n_confirmed -= n_persist_rejected_points
+            print(f"  The second run has {len(other_points)} points in damage sites. "
+                  f"Sites kept: {len(clusters_summary)}, rejected: {len(persist_rejected)} "
+                  f"({n_persist_rejected_points} points).")
+            for record in persist_rejected:
+                c = ", ".join(f"{v:.2f}" for v in record["centroid"])
+                print(f"    rejected: {record['point_count']} points at ({c}): the second run "
+                      f"has points within {args.persist_distance:g} m for "
+                      f"{record['persist_share'] * 100:.0f} % of them")
+            if args.find_holes and change_inward is not None:
+                n_added_points = int(sum(c["point_count"] for c in clusters_summary
+                                         if c.get("type") == "added"))
+                n_removed_points = int(sum(c["point_count"] for c in clusters_summary
+                                           if c.get("type") == "removed"))
+
     # --- Holes (--find-holes): points without an M3C2 distance ------------
     hole_records = []
     hole_rejected = []
     unmatched_records = []
+    unmatched_support_rejected = []
     n_hole_points = 0
     n_unmatched_points = 0
     hole_mask = np.zeros(n_total, dtype=bool)
@@ -999,6 +1989,25 @@ def main():
             print(f"ERROR: --find-holes needs scipy and scikit-learn ({e}). "
                   f"Run: pip install scipy scikit-learn")
             return 1
+        if args.find_unmatched and args.unmatched_support and unmatched:
+            names_ = vertex.data.dtype.names or ()
+            pair_ = tuple(args.density_fields) if args.density_fields else \
+                find_density_fields(names_)
+            count2 = None
+            if pair_ is not None and pair_[1] in names_:
+                count2 = np.asarray(vertex[pair_[1]], dtype=np.float64)
+            else:
+                print("  NOTE: --unmatched-support: the file has no point-count field of the "
+                      "second scan. Only the test with the valid points around the site is used.")
+            n_before = len(unmatched)
+            unmatched_labels, unmatched, unmatched_support_rejected = unmatched_support_filter(
+                xyz, unmatched_labels, unmatched, significant, finite_mask, count2,
+                args.unmatched_empty_share, args.unmatched_changed_share)
+            print(f"  Unmatched support: kept {len(unmatched)} of {n_before} unmatched sites.")
+            for record in unmatched_support_rejected:
+                c = ", ".join(f"{v:.2f}" for v in record["centroid"])
+                print(f"    rejected: {record['point_count']} points at ({c}): "
+                      f"{'; '.join(record['reasons'])}")
         first_hole_id = len(clusters_summary)
         for number, record in enumerate(holes):
             hole_records.append({"cluster_id": first_hole_id + number, "type": "hole", **record})
@@ -1045,18 +2054,31 @@ def main():
         print(f"  Missing points in no cluster at all: {n_isolated}")
 
     # Fields that --find-holes adds to the output cloud.
+    n_unlabelled = 0
     change_columns = []
     if args.find_holes and change_inward is not None:
         shown = change_inward.astype(np.float32)
         shown[hole_mask] = -abs(args.hole_value)
         kind_field = direction.astype(np.int32)
+        n_unlabelled = 0
+        if args.cluster and not args.label_noise:
+            # Only the points of a kept site have the type added or removed. The
+            # flagged points that the clustering or a site limit rejected get 0.
+            rejected_flag = (kind_field != CHANGE_NONE) & (cluster_id < 0)
+            n_unlabelled = int(rejected_flag.sum())
+            kind_field[rejected_flag] = CHANGE_NONE
         kind_field[hole_mask] = CHANGE_HOLE
         kind_field[unmatched_mask] = CHANGE_UNMATCHED
         change_columns = [("change_inward", "f4", shown), ("change_type", "i4", kind_field)]
+        if n_unlabelled:
+            print(f"\nchange_type: {n_unlabelled} flagged points are in no kept damage site. "
+                  f"They get change_type 0 (use --label-noise for the old labels).")
 
     # --- Write output cloud ------------------------------------------------
     if args.keep_all:
         columns = [("classified", "i4", np.asarray(significant, dtype=np.int32))]
+        if background is not None:
+            columns.append(("background", "f4", background.astype(np.float32)))
         if args.cluster:
             # "i4" (32-bit), not "i8" (64-bit): the PLY format has no
             # standard 64-bit integer type at all, so plyfile's own type
@@ -1086,6 +2108,8 @@ def main():
             # Same "i4" not "i8" fix as the keep_all branch above.
             columns = [("cluster_id", "i4", cluster_id[keep_mask].astype(np.int32))]
             columns += [(name, t, values[keep_mask]) for name, t, values in change_columns]
+            if background is not None:
+                columns.append(("background", "f4", background[keep_mask].astype(np.float32)))
             filtered_data = add_fields(filtered_data, columns)
         out_element = PlyElement.describe(filtered_data, "vertex")
         n_written = int(keep_mask.sum())
@@ -1113,6 +2137,38 @@ def main():
             "n_confirmed": n_confirmed,
             "clusters": clusters_summary,
         }
+        if size_filter_on:
+            summary["min_site_width"] = args.min_site_width
+            summary["min_site_area"] = args.min_site_area
+            summary["min_site_fill"] = args.min_site_fill
+            summary["n_size_rejected"] = len(size_rejected)
+            summary["n_size_rejected_points"] = n_size_rejected_points
+            summary["size_rejected"] = size_rejected
+        if cluster_auto is not None:
+            summary["cluster_auto"] = {k: (round(v, 5) if isinstance(v, float) else v)
+                                       for k, v in cluster_auto.items()}
+        if shape_filter_on:
+            summary["min_site_flatness"] = args.min_site_flatness
+            summary["max_site_aspect"] = args.max_site_aspect
+            summary["n_shape_rejected"] = len(shape_rejected)
+            summary["n_shape_rejected_points"] = n_shape_rejected_points
+            summary["shape_rejected"] = shape_rejected
+        if args.persist_with:
+            summary["persist_with"] = str(args.persist_with)
+            summary["persist_distance"] = args.persist_distance
+            summary["persist_share"] = args.persist_share
+            summary["n_persist_rejected"] = len(persist_rejected)
+            summary["n_persist_rejected_points"] = n_persist_rejected_points
+            summary["persist_rejected"] = persist_rejected
+        if n_density_low is not None:
+            summary["density_drop"] = args.density_drop
+            summary["n_density_low"] = n_density_low
+        if args.remove_background is not None:
+            summary["remove_background"] = (args.remove_background
+                                            if background is not None else None)
+        if registration_error_used is not None:
+            summary["registration_error_was"] = args.registration_error_was
+            summary["registration_error_used"] = registration_error_used
         if args.find_holes:
             # n_confirmed, n_noise and n_flagged keep their meaning: measured
             # change only. The points of holes are counted on their own.
@@ -1129,6 +2185,11 @@ def main():
                 "n_removed_points": n_removed_points,
                 "n_holes": len(hole_records),
                 "n_hole_points": n_hole_points,
+                "label_noise": bool(args.label_noise),
+                "n_unlabelled_flagged": n_unlabelled,
+                "unmatched_support": bool(args.unmatched_support),
+                "n_unmatched_support_rejected": len(unmatched_support_rejected),
+                "unmatched_support_rejected": unmatched_support_rejected,
                 "find_unmatched": bool(args.find_unmatched),
                 "n_unmatched": len(unmatched_records),
                 "n_unmatched_points": n_unmatched_points,

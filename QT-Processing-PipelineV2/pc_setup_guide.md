@@ -26,7 +26,7 @@ Some packages that the application uses do not support the newest Python version
 3. Find a release in the **Python 3.11** series or the **Python 3.12** series.
 4. Click the link for the **Windows installer (64-bit)** for that release.
 
-**CAUTION:** Do not use a Python version newer than 3.12. The `open3d` package does not install on newer versions. Stages 2 and 4 do not operate without `open3d`.
+**CAUTION:** Do not use a Python version newer than 3.12. The `open3d` package does not install on newer versions. Stage 2, Stage 4 and the point spacing check of Stage 5 do not operate without `open3d`.
 
 ### 2b. Run the Installer
 
@@ -79,9 +79,10 @@ Some packages that the application uses do not support the newest Python version
            blender_surface.py
            extract_damage_detail.py
            usd_export.py
-           generate_m3c2_params.py
+           import_pointcloud.py
        configs\
            kiss_icp_config_indoor.yaml
+           kiss_icp_config_hesai.yaml
            ExtraDownsampling.blend
    ```
 
@@ -114,7 +115,9 @@ python -m pip install "PySide6>=6.5"
 ```
 Then do steps 6 and 7 again.
 
-**NOTE:** `requirements.txt` sets `kiss-icp` to version 1.2.3. The Stage 1 script is tested with this version. Do not upgrade `kiss-icp` without a test.
+**NOTE:** `requirements.txt` sets `kiss-icp` to version 1.2.3. The Stage 1 script works with this version. Do not upgrade `kiss-icp`. Other versions can give errors.
+
+**NOTE:** The package `rosbags` comes with `ouster-sdk` (version 0.9.x). The Stage 1 bag reader works with `rosbags` 0.9.23 and with `rosbags` 0.11.0. You do not need to change the version. The package `kiss-icp` does not install `rosbags` itself.
 
 **NOTE:** If `open3d` does not install, go to Sections 8 and 9 of the troubleshooting sheet.
 
@@ -136,7 +139,7 @@ Stage 3 (Cleanup) and Stage 5 (Diff) use CloudCompare.
 
 ### 6b. Install Blender
 
-Stage 7 (Surface) uses Blender.
+Stage 7 (Surface) uses Blender to make the mesh.
 
 1. Open a web browser.
 2. Go to `https://www.blender.org/download/`.
@@ -148,11 +151,11 @@ Stage 7 (Surface) uses Blender.
 
 **CAUTION:** Use Blender 5.2 or newer. The file `configs\ExtraDownsampling.blend` was saved with Blender 5.2. An older Blender version can give a wrong result or an error.
 
-**NOTE:** You do not have to add Blender to PATH. The application finds Blender in its default installation folder (`C:\Program Files\Blender Foundation\Blender <version>`) or in the Steam folder. If you installed Blender in a different folder, click **Browse...** next to "Blender program" in Stage 7 and select `blender.exe`. You can also set the environment variable `DELTA_BLENDER` to the full path of `blender.exe`.
+**NOTE:** You do not have to add Blender to PATH. The application finds Blender in its default installation folder (`C:\Program Files\Blender Foundation\Blender <version>`) or in the Steam folder. If you installed Blender in a different folder, open **Advanced** in Stage 7. Click **Browse...** next to "Blender program" and select `blender.exe`. You can also set the environment variable `DELTA_BLENDER` or `BLENDER_EXE` to the full path of `blender.exe`.
 
-**NOTE:** In Stage 7, the line below "Blender program" shows "Blender found" (green) or "Blender not found" (red).
+**NOTE:** In Stage 7, a red line shows above the field "Voxel size" only when the application does not find Blender. When the application finds Blender, no line shows.
 
-**NOTE:** A large input (millions of points) needs some minutes and some GB of memory. In a test, a cloud of 3.9 million points needed 1.5 minutes and 5 GB of memory.
+**NOTE:** A large input (millions of points) needs some minutes and some GB of memory.
 
 ## 7. Add the Tools to PATH
 
@@ -205,37 +208,9 @@ Do this procedure if a command in Section 8 fails.
 
 **NOTE:** If a stage page shows "could not load", open the **Log** tab. The Log tab shows the full error. Usually the cause is a Python package that is not installed. Do Section 5 again.
 
-## 10. Do the Self-Tests (Testers)
+**NOTE:** The **?** button at the end of a field row opens a short explanation of the field. The explanation tells what the field does, what a smaller or larger value does, and when to change it. Click anywhere else to close it.
 
-Do these tests after you install the application. The tests do not need LiDAR data, CloudCompare or `ouster-cli`.
-
-1. Open a new Command Prompt window.
-2. Go to the `gui` folder. Type this command and push Enter:
-   ```
-   cd C:\DELTA\gui
-   ```
-3. Type each command and push Enter. Wait until each command is complete.
-   ```
-   python test_project_manager.py
-   python test_pipeline_core_project_mode.py
-   python test_qt_smoke.py
-   python test_blender_surface.py
-   python test_usd_export.py
-   python test_damage_detail.py
-   python test_segment_to_usd.py
-   ```
-4. Make sure that each test shows `ALL TESTS PASSED` or `All ... checks passed` at the end.
-
-**NOTE:** `test_blender_surface.py` runs Blender. If the application cannot find Blender, the test shows `SKIPPED`. Install Blender (Section 6b) and do the test again. If Blender is in a different folder, type this command:
-```
-python test_blender_surface.py --blender "<full path of blender.exe>"
-```
-
-**NOTE:** `test_segment_to_usd.py` runs the Stage 4, Stage 6 and Stage 8 scripts on a test room. It needs `open3d` and `scikit-learn` (Section 5). It can run for up to 1 minute.
-
-**NOTE:** If a test shows `[FAIL]`, the test stops. Copy all of the text in the window into your bug report.
-
-## 11. Stop a Stage
+## 10. Stop a Stage
 
 A stage can run for a long time. For example, Stage 4 (Segment) can run for many minutes on a large floor surface.
 
@@ -247,7 +222,7 @@ A stage can run for a long time. For example, Stage 4 (Segment) can run for many
 
 **NOTE:** If you close the application while a stage runs, the application asks for confirmation. If you confirm, the application stops the process and records the stage as failed.
 
-## 12. Quick Reference Checklist
+## 11. Quick Reference Checklist
 
 | Item | Check command | Correct result |
 |---|---|---|
@@ -256,7 +231,52 @@ A stage can run for a long time. For example, Stage 4 (Segment) can run for many
 | Other Python packages | `python -m pip show open3d kiss-icp` | Details for each package |
 | Ouster CLI | `where ouster-cli` | A path to `ouster-cli.exe` |
 | CloudCompare | `where CloudCompare` | A path to `CloudCompare.exe` |
-| Blender | Open Stage 7 in the application | The line below "Blender program" shows "Blender found" |
-| Blender self-test | `python test_blender_surface.py` (in `gui`) | `All ... checks passed` |
-| Self-tests | `python test_qt_smoke.py` (in `gui`) | `All ... checks passed` |
+| Blender | Open Stage 7 in the application | No red line "Blender not found" shows above "Voxel size" |
 | Application | Double-click `run_pipeline_qt.bat` | The application window opens |
+
+## 12. Use a Hesai Sensor (Stage 1)
+
+The Hesai XT32 lidar replaces the Ouster OS0-128. Stage 1 reads the Hesai bag with the KISS-ICP backend. The Ouster CLI backend cannot read a Hesai bag.
+
+### 12a. Record a Bag
+
+1. Start the Hesai driver on the Jetson.
+2. Record the topic `/lidar_points`. It has the message type `sensor_msgs/msg/PointCloud2`.
+3. Copy the bag folder to the PC. The folder has a `.db3` file and the file `metadata.yaml`.
+
+**NOTE:** The pipeline does not use the topic `/lidar_packets`. The application cannot read its message type.
+
+**NOTE:** A bag that you record with the sensor on a table does not show how SLAM operates on the robot. Also record a bag with the sensor on the QBot.
+
+### 12b. Run Stage 1
+
+1. Open Stage 1.
+2. Set **Backend** to **KISS-ICP** (the first choice).
+3. Click **Folder...** and select the bag folder.
+4. Set **Sensor preset** to **Hesai XT32**. Open **Advanced**. The field **Config .yaml** then shows `kiss_icp_config_hesai.yaml`.
+5. Select the output file and click **Run**.
+6. Read the output text. Make sure that it shows these lines:
+   - `ROS2 bag read by this script`
+   - `Time field 'timestamp': float64`
+   - `Deskew used the time field 'timestamp' for every frame`
+
+**CAUTION:** If the output text shows `WITHOUT deskew`, send the output text to the team. The map can have errors when the sensor moves.
+
+**NOTE:** The output text also shows how many points at exactly (0, 0, 0) the reader removed. The Hesai driver writes these points when a return did not come back. They are not real points.
+
+**NOTE:** If the Ouster CLI backend is selected, Stage 1 shows a message and does not start. Change **Backend** to **KISS-ICP**.
+
+### 12c. Settings
+
+- The config `kiss_icp_config_hesai.yaml` has the same values as the Ouster config, with one change: `min_range` is 0.1 m. This value removes only the points at (0, 0, 0).
+- The other values (`voxel_size`, `max_range`) are not tuned for the Hesai sensor. A Hesai frame has fewer points than an Ouster frame (about 13 000 against about 131 000). Tune the values with a recording where the sensor moves.
+- The sensor can see parts of the QBot. If it does, open **Advanced** and set **Min range override** to a value larger than the distance to these parts. Measure the distance on a recording with the sensor on the QBot.
+
+### 12d. If the Bag Does Not Read
+
+| Message | Cause | Action |
+|---|---|---|
+| `The bag has more than one PointCloud2 topic` | The bag has two or more point topics. | Type the topic in **Rosbag topic** (for example `/lidar_points`). |
+| `The bag has no PointCloud2 topic` | The bag has only raw packets or other data. | Record the topic `/lidar_points` again. |
+| `Bag contains no type definitions` | The bag was read by an old Stage 1 script with `rosbags` 0.10 or newer. | Use the Stage 1 script that comes with this application (`scripts\slam_kiss_icp.py`). |
+| `WITHOUT deskew` | The points have no time field, or the time cannot be used. | Send the output text to the team. |

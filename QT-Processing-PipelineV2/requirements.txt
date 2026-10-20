@@ -6,7 +6,7 @@
 # GUI - the Qt toolkit that makes the application window (required)
 PySide6>=6.5
 
-# Point cloud processing (Stages 2, 4, 5 point spacing, 6, 8)
+# Point cloud processing (Stages 2, 4, 5 point spacing, 7)
 numpy
 open3d
 plyfile
@@ -14,7 +14,7 @@ scipy
 
 # Stage 1 (SLAM)
 ouster-sdk        # provides ouster-cli (Ouster CLI backend)
-rosbags           # ROS bag reading (both backends) and decode_raw_packets.py
+rosbags           # ROS bag reading (Stage 1 reader and decode_raw_packets.py). Tested with 0.9.23 and 0.11.0. ouster-sdk installs 0.9.x. No version limit needed.
 pyyaml            # KISS-ICP config labels in Stage 1
 kiss-icp==1.2.3   # slam_kiss_icp.py (including --map-max-range) is verified against this version
 

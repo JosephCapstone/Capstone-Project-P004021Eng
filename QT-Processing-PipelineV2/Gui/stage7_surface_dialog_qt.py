@@ -30,6 +30,22 @@ the value saved in the .blend file (for a different recipe that does not
 have these inputs). They show cm and pass metres, like every other small
 length in this app.
 
+Update 25: two more recipe fields.
+  - "Island filter size (vertices)", default 20 (RECIPE_DEFAULTS, saved in
+    ExtraDownsampling.blend; 1 = off). The recipe deletes each separate
+    mesh piece with fewer vertices than this, EXCEPT a piece that has a
+    vertex nearest to a damage-site point (cluster_id >= 0) - so a
+    small piece at a damage site is never deleted. An input without
+    cluster_id has no such protection; the report says so. Always sent
+    with --set, like the three lengths.
+  - "Only this change type (optional)": blank (default) = all points; 0
+    to 4 = only the input points with that change_type. Sent only when
+    filled (the .blend file saves -1 = all types).
+On the sim4 surface (984 000 vertices) the island filter at 20 removed
+13 342 of 16 336 pieces (bubbles from stray points, 90 % 'no change'
+points) and no damage-site vertex. Without the protection, the same
+filter removed 13 020 damage-site vertices.
+
 Carry fields (update 9): a checkable list, filled from the header of the
 input .ply each time the Input field changes
 (pipeline_core.carryable_ply_fields() - reads only the header, so it is
@@ -52,7 +68,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QListWidget, QListWidgetItem
 
-from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, CONFIGS_DIR, fmt_cm
+from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, CONFIGS_DIR, fmt_cm, project_input_default
 
 try:
     import project_manager as pm
@@ -70,25 +86,62 @@ DEFAULT_BLENDER_SCRIPT = SCRIPTS_DIR / "blender_surface.py"
 # Checked by default when the input has them: change_inward (Stage 6 with
 # Find holes: the same sign on every wall, and a value on the hole points -
 # Stage 8 colours the mesh by it when it is there), the M3C2 distance (Stage 8
-# colours the mesh by it otherwise) and the damage site of each point (Stage 6).
-DEFAULT_CARRY_FIELDS = ["change_inward", "scalar_M3C2_distance", "cluster_id"]
+# colours the mesh by it otherwise), the damage site of each point (Stage 6) and,
+# since update 28, the change type of each point (Stage 6 with Find holes).
+DEFAULT_CARRY_FIELDS = ["change_inward", "scalar_M3C2_distance", "cluster_id", "change_type"]
 
-# Values saved in configs/ExtraDownsampling.blend, in metres. The fields
-# start with these. test_blender_surface.py checks them against the file.
+# Values saved in configs/ExtraDownsampling.blend (lengths in metres, the
+# island filter size in vertices). The fields start with these.
+# test_blender_surface.py checks them against the file.
+ISLAND_FILTER_INPUT = "Cleaning/Island Filter Size"
+CHANGE_TYPE_INPUT = "Filter/Change Type"
 RECIPE_DEFAULTS = {
     "Mesh/Voxel Size": 0.025,
     "Mesh/Radius": 0.015,
     "Cleaning/Delete Further": 0.02,
+    ISLAND_FILTER_INPUT: 20,
 }
 
-# (field key, node input path in the .blend file, name shown in messages)
+# The length fields: (field key, node input path in the .blend file, name
+# shown in messages). The island filter and the change type are not
+# lengths - see ISLAND_FILTER_INPUT and CHANGE_TYPE_INPUT.
 BLENDER_OVERRIDES = [
     ("blender_voxel_size", "Mesh/Voxel Size", "Voxel size"),
     ("blender_radius", "Mesh/Radius", "Volume radius"),
     ("blender_delete_further", "Cleaning/Delete Further", "Delete further"),
 ]
 
+# Stage 6 change_type values (m3c2_classify.py --find-holes).
+CHANGE_TYPE_NAMES = {0: "no change", 1: "added", 2: "removed", 3: "hole", 4: "unmatched"}
+
 METHOD_LABEL = "Blender (Geometry Nodes)"
+
+
+def parse_island_filter_size(text):
+    """'' -> None (keep the .blend value). Otherwise a whole number of 1 or
+    more (1 = off), else ValueError."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        value = None
+    if value is None or value != int(value) or value < 1:
+        raise ValueError("Island filter size must be a whole number of 1 or more "
+                         "(1 = off), or blank to use the value in the .blend file.")
+    return int(value)
+
+
+def parse_change_type(text):
+    """'' -> None (all points). Otherwise 0 to 4, else ValueError."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if raw not in {"0", "1", "2", "3", "4"}:
+        raise ValueError("Only this change type must be 0, 1, 2, 3 or 4, or blank for "
+                         "all points.")
+    return int(raw)
 
 
 def _looks_like_m3c2_distance(name):
@@ -173,17 +226,12 @@ class Stage7SurfaceFieldsMixin:
     def _build_surface_fields(self, pipeline=None):
         self.add_pipeline_label(pipeline)
 
-        self.add_file_field("script", "Blender script (.py):", [("Python files", "*.py")],
-                            default=str(DEFAULT_BLENDER_SCRIPT))
-
         input_edit = self.add_file_field("input", "Classified change cloud .ply:",
                                          [("PLY files", "*.ply")])
         self.add_project_picker_button(
             "input", lambda: pm.list_eligible_inputs(self.pipeline, "surface"))
-        self.add_hint(
-            "Usually the Stage 6 (Classify) output. With 'Keep all points' in Stage 6, the "
-            "mesh covers the full surface, and Stage 8 shows the flagged points as a "
-            "separate layer.")
+        self.register_auto_default(
+            "input", lambda p: project_input_default(p, "surface"), fill_now=True)
 
         output_default = self.resolve_project_output_default(pipeline, "surface", ".ply")
         self.add_save_field("output", "Output mesh .ply:", default_ext=".ply",
@@ -191,70 +239,27 @@ class Stage7SurfaceFieldsMixin:
         self.register_auto_default(
             "output", lambda p: self.resolve_project_output_default(p, "surface", ".ply"))
 
-        found = core.find_blender_executable() if core is not None else None
-        exe_edit = self.add_file_field(
-            "blender_exe", "Blender program (blender.exe):",
-            [("Blender", "blender.exe blender Blender"), ("All files", "*.*")],
-            default=found or "")
+        # Update 28: the Blender program field is in Advanced (below). This line is
+        # outside Advanced and shows only when Blender is NOT found, in red.
         self.blender_status_label = QLabel()
         self.blender_status_label.setWordWrap(True)
         self.form.addWidget(self.blender_status_label)
-        exe_edit.textChanged.connect(self._update_blender_status)
-        self._update_blender_status()
-        self.add_hint(
-            "Blender 5.2 or newer. The app finds Blender in its default installation folder "
-            "or in the Steam folder. If Blender is in a different folder, click Browse... "
-            "and select blender.exe.")
-
-        self.add_file_field(
-            "blend_file", ".blend file (recipe):", [("Blender files", "*.blend")],
-            default=str(DEFAULT_BLEND_FILE) if DEFAULT_BLEND_FILE.exists() else "")
-        self.add_hint(
-            "The recipe: one object with a Geometry Nodes modifier. The recipe removes stray "
-            "points, makes a volume around the remaining points, and makes the surface of "
-            "that volume. The app puts the input points into the recipe object, runs the "
-            "modifier one time, and saves the result. The app does not change the .blend "
-            "file.")
-        self.add_text_field("blender_object", "Object name (optional):")
-        self.add_hint(
-            "Leave blank to use the only object in the .blend file that has a Geometry "
-            "Nodes modifier.")
 
         self.add_length_field("blender_voxel_size", "Voxel size (cm):",
                               default_m=str(RECIPE_DEFAULTS["Mesh/Voxel Size"]),
                               min_cm=0.1, max_cm=50)
-        self.add_hint(
-            "Default 2.5 cm. The size of the volume cells. A smaller value gives more "
-            "detail, a slower run and a larger file. A larger value can close the surface "
-            "over small damage.")
-
-        self.add_length_field("blender_radius", "Volume radius (cm):",
-                              default_m=str(RECIPE_DEFAULTS["Mesh/Radius"]),
-                              min_cm=0.1, max_cm=50)
-        self.add_hint(
-            "Default 1.5 cm. The size of the sphere around each point. Increase it to close "
-            "gaps between points. Decrease it to keep the surface nearer to the points, but "
-            "holes can occur. In a test on real data, 2 cm moved the surface away from the "
-            "points: 11% of the points were more than 5 cm from the mesh (1.5 cm: almost "
-            "none).")
-
-        self.add_length_field("blender_delete_further", "Delete further (cm):",
-                              default_m=str(RECIPE_DEFAULTS["Cleaning/Delete Further"]),
-                              min_cm=0.1, max_cm=50)
-        self.add_hint(
-            "Default 2 cm. Before the recipe makes the surface, it removes each point that "
-            "has no neighbour nearer than this distance. Increase it to keep more isolated "
-            "points.")
-        self.add_hint(
-            "The three defaults are the values saved in ExtraDownsampling.blend. The app "
-            "always sends the values on this page to Blender. If you use a different .blend "
-            "file that does not have these inputs, clear the three fields: a blank field "
-            "keeps the value saved in the .blend file. The Terminal tab shows the values "
-            "that Blender used.")
 
         row = self._row("Carry fields:")
         carry_list = QListWidget()
         carry_list.setMaximumHeight(110)
+        # Update 28: the entries fill the width of the box (several columns, then a
+        # new row). A scroll bar shows only when the rows do not fit in the height.
+        carry_list.setFlow(QListWidget.LeftToRight)
+        carry_list.setWrapping(True)
+        carry_list.setResizeMode(QListWidget.Adjust)
+        carry_list.setMovement(QListWidget.Static)
+        carry_list.setSpacing(6)
+        carry_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         row.addWidget(carry_list, 1)
         self.form.addLayout(row)
         carry_status = QLabel()
@@ -264,15 +269,161 @@ class Stage7SurfaceFieldsMixin:
         self.fields["carry_fields"] = CarryFieldsRef(carry_list, carry_status)
         input_edit.textChanged.connect(self._update_carry_fields)
         self._update_carry_fields()
-        self.add_hint(
-            "The list shows the fields of the input .ply. Each checked field is copied from "
-            "the nearest input point onto each mesh vertex. Default: change_inward (Stage 6 with "
-            "Find holes: the same sign on every wall, and a value on the hole areas; Stage 8 "
-            "colours the mesh by it when it is there), scalar_M3C2_distance and cluster_id "
-            "(the damage site of each point), when the input has them. You can check more than one field. Clear all fields to "
-            "carry nothing. The mesh file keeps each value, but writes each field as a "
-            "decimal number (a cluster_id of 3 is written as 3.0). Normals and colours are "
-            "not in the list: Blender cannot carry them.")
+
+        # Update 29: the explanations are in "?" popups (what it does, what the
+        # options do, when to change it).
+        self.add_help(
+            "input",
+            "The point cloud that the mesh is made from. Usually the Stage 6 (Classify) "
+            "output.",
+            when="Change it to make a mesh from a different cloud. With 'Keep all points' "
+                 "in Stage 6, the mesh covers the full surface, and Stage 8 shows the "
+                 "flagged points as a separate layer.")
+        self.add_help(
+            "output",
+            "The mesh file that Stage 7 writes.",
+            when="Change it to save under another name. In project mode the name comes "
+                 "from the pipeline.")
+        self.add_help(
+            "blender_voxel_size",
+            "The size of the cells of the volume that Blender makes around the points. The "
+            "mesh is the surface of this volume.",
+            effects=[
+                ("Smaller", "more detail. The run is slower and the file is larger."),
+                ("Larger", "the run is faster. The surface can close over small damage."),
+            ],
+            when="The mesh is too coarse, or small damage is not in the mesh (lower the "
+                 "value). The run is too slow or the file is too large (raise the value).")
+        self.add_help(
+            carry_list,
+            "The fields of the input .ply that are copied to the mesh. Each field that you "
+            "check is copied from the nearest input point to each mesh vertex. The list "
+            "shows the fields of the input file.",
+            effects=[
+                ("change_type", "the type of each point: 0 no change, 1 added, 2 removed, "
+                                "3 hole, 4 unmatched (Stage 6 with Find holes)."),
+                ("change_inward", "the same sign on every wall, and a value on the hole "
+                                  "areas (Stage 6 with Find holes). Stage 8 colours the "
+                                  "mesh by it when it is there."),
+                ("scalar_M3C2_distance", "the M3C2 distance of each point."),
+                ("cluster_id", "the damage site of each point."),
+            ],
+            when="Check the fields that you need in Stage 8. You can check more than one "
+                 "field. Clear all fields to carry nothing. The mesh file keeps each "
+                 "value, but writes each field as a decimal number (a cluster_id of 3 is "
+                 "written as 3.0).",
+            note="Normals and colours are not in the list. Blender cannot carry them.")
+
+        # Settings that normally stay at their default values (closed block).
+        self.begin_advanced("Advanced")
+
+        # Update 28: the Blender program (path and Browse) is in Advanced.
+        found = core.find_blender_executable() if core is not None else None
+        exe_edit = self.add_file_field(
+            "blender_exe", "Blender program (blender.exe):",
+            [("Blender", "blender.exe blender Blender"), ("All files", "*.*")],
+            default=found or "")
+        exe_edit.textChanged.connect(self._update_blender_status)
+        self._update_blender_status()
+        self.add_help(
+            exe_edit,
+            "The Blender program that makes the mesh. Blender 5.2 or newer is necessary.",
+            when="The red line above the Voxel size field says that Blender is not found. "
+                 "The app looks in the default installation folder and in the Steam "
+                 "folder. If Blender is in a different folder, click Browse... and select "
+                 "blender.exe.")
+
+        self.add_file_field("script", "Blender script (.py):", [("Python files", "*.py")],
+                            default=str(DEFAULT_BLENDER_SCRIPT))
+        self.add_help(
+            "script",
+            "The Python script that Blender runs.",
+            when="Change it only to use a changed copy of the script.")
+
+        self.add_file_field(
+            "blend_file", ".blend file (recipe):", [("Blender files", "*.blend")],
+            default=str(DEFAULT_BLEND_FILE) if DEFAULT_BLEND_FILE.exists() else "")
+        self.add_help(
+            "blend_file",
+            "The recipe: one object with a Geometry Nodes modifier. The recipe removes stray "
+            "points, makes a volume around the remaining points, and makes the surface of "
+            "that volume. The app puts the input points into the recipe object, runs the "
+            "modifier one time, and saves the result. The app does not change the .blend "
+            "file.",
+            when="Change it to use a different recipe. The four defaults below are the "
+                 "values saved in ExtraDownsampling.blend. The app always sends the values "
+                 "on this page to Blender. If the .blend file does not have these inputs, "
+                 "clear the fields: a blank field keeps the value saved in the .blend "
+                 "file. The Terminal tab shows the values that Blender used.")
+        self.add_text_field("blender_object", "Object name (optional):")
+        self.add_help(
+            "blender_object",
+            "The name of the recipe object in the .blend file.",
+            when="The .blend file has more than one object with a Geometry Nodes "
+                 "modifier. Leave the box empty to use the only such object.")
+
+        self.add_length_field("blender_radius", "Volume radius (cm):",
+                              default_m=str(RECIPE_DEFAULTS["Mesh/Radius"]),
+                              min_cm=0.1, max_cm=50)
+        self.add_help(
+            "blender_radius",
+            "The size of the sphere around each point that makes the volume.",
+            effects=[
+                ("Smaller", "the surface stays nearer to the points. Holes can occur."),
+                ("Larger", "gaps between points close. The surface can move away from "
+                           "the points."),
+            ],
+            when="The mesh has gaps (raise the value), or the mesh is too far from the "
+                 "points (lower the value).")
+
+        self.add_length_field("blender_delete_further", "Delete further (cm):",
+                              default_m=str(RECIPE_DEFAULTS["Cleaning/Delete Further"]),
+                              min_cm=0.1, max_cm=50)
+        self.add_help(
+            "blender_delete_further",
+            "Before the recipe makes the surface, it removes each point that has no "
+            "neighbour nearer than this distance.",
+            effects=[
+                ("Smaller", "more isolated points are removed."),
+                ("Larger", "more isolated points stay in the mesh."),
+            ],
+            when="Real thin parts are missing from the mesh (raise the value), or stray "
+                 "points make bubbles (lower the value).")
+
+        self.add_text_field("blender_island_filter", "Island filter size (vertices):",
+                            default=str(RECIPE_DEFAULTS[ISLAND_FILTER_INPUT]))
+        self.add_help(
+            "blender_island_filter",
+            "After the recipe makes the surface, it deletes each separate piece of the "
+            "mesh that has fewer vertices than this value. These pieces are small bubbles "
+            "around stray points near the walls. A piece that touches a damage site (an "
+            "input point with cluster_id 0 or more) is always kept, at any size.",
+            effects=[
+                ("1", "the filter is off."),
+                ("Smaller", "fewer pieces are deleted."),
+                ("Larger", "more pieces are deleted. A real small piece can go."),
+            ],
+            when="The mesh has many small bubbles (raise the value), or a small real "
+                 "piece is missing (lower the value).",
+            note="If the input has no cluster_id, the recipe cannot see the damage sites "
+                 "and deletes every small piece.")
+
+        self.add_text_field("blender_change_type", "Only this change type (optional):")
+        self.add_help(
+            "blender_change_type",
+            "Makes the surface only from the input points with this Stage 6 change_type: "
+            "0 no change, 1 added, 2 removed, 3 hole, 4 unmatched. The input must have "
+            "the change_type field.",
+            effects=[
+                ("Empty", "all points are used."),
+                ("0 to 4", "only the points of this type are used."),
+            ],
+            when="You need a mesh of one type of change. Added and removed points are "
+                 "often scattered, so a surface of one of these types can be many small "
+                 "pieces.")
+
+        self.end_advanced()
+        self.keep_field_order("script", "input", "output")
 
         self.form.addStretch(1)
 
@@ -282,15 +433,20 @@ class Stage7SurfaceFieldsMixin:
         self.fields["carry_fields"].fill(fields)
 
     def _update_blender_status(self):
+        """Red line outside Advanced: only when Blender is not found. When
+        Blender is found, the line is hidden (the text is kept for tests)."""
         path = self.fields["blender_exe"].get().strip()
         if path and Path(path).is_file():
             self.blender_status_label.setText(f"Blender found: {path}")
             self.blender_status_label.setStyleSheet("color: #009955; font-size: 8pt;")
+            self.blender_status_label.setVisible(False)
         else:
             self.blender_status_label.setText(
-                "Blender not found. Install Blender 5.2 or newer, or click Browse... and "
-                "select blender.exe.")
-            self.blender_status_label.setStyleSheet("color: #bb0000; font-size: 8pt;")
+                "Blender not found. Open Advanced and click Browse... next to 'Blender "
+                "program', or install Blender 5.2 or newer.")
+            self.blender_status_label.setStyleSheet(
+                "color: #bb0000; font-size: 9pt; font-weight: bold;")
+            self.blender_status_label.setVisible(True)
 
     # -- Run ----------------------------------------------------------------
 
@@ -306,7 +462,8 @@ class Stage7SurfaceFieldsMixin:
                 "Blender program not found"
                 + (f":\n{blender_exe}" if blender_exe else ".")
                 + "\n\nInstall Blender 5.2 or newer (see pc_setup_guide.md), or click "
-                  "Browse... next to 'Blender program' and select blender.exe.")
+                  "Browse... next to 'Blender program (blender.exe)' in Advanced and "
+                  "select blender.exe.")
         blend_file = self.require_existing_file("blend_file", ".blend file")
         object_name = self.fields["blender_object"].get().strip() or None
         carry_fields = core.split_field_names(self.fields["carry_fields"].get())
@@ -324,6 +481,14 @@ class Stage7SurfaceFieldsMixin:
             if value <= 0:
                 raise ValueError(f"{human_name} must be more than 0, or blank.")
             overrides[node_path] = value
+        island_size = parse_island_filter_size(self.fields["blender_island_filter"].get())
+        if island_size is not None:
+            overrides[ISLAND_FILTER_INPUT] = island_size
+        change_type = parse_change_type(self.fields["blender_change_type"].get())
+        if change_type is not None:
+            overrides[CHANGE_TYPE_INPUT] = change_type
+        input_fields = (core.read_ply_vertex_fields(input_ply) or []) if core else []
+        input_names = {name for name, _type in input_fields}
 
         active_pipeline = self.get_active_pipeline_for_run()
         cmd = core.build_blender_surface_command(
@@ -342,6 +507,29 @@ class Stage7SurfaceFieldsMixin:
 
         value_lines = "".join(f"{human_name}: {value_text(node_path)}\n"
                               for _key, node_path, human_name in BLENDER_OVERRIDES)
+        if island_size is None:
+            value_lines += "Island filter: value in the .blend file\n"
+        else:
+            marker = (" (default)" if island_size == RECIPE_DEFAULTS[ISLAND_FILTER_INPUT]
+                      else " (changed)")
+            if island_size <= 1:
+                value_lines += f"Island filter: off (1){marker}\n"
+            elif "cluster_id" in input_names:
+                value_lines += (f"Island filter: {island_size} vertices{marker}. Small pieces "
+                                f"at a damage site (cluster_id 0 or more) are kept.\n")
+            else:
+                value_lines += (f"Island filter: {island_size} vertices{marker}.\n"
+                                "WARNING: the input has no cluster_id field. The recipe cannot "
+                                "see the damage sites, so it also deletes small pieces at "
+                                "damage. Set the island filter to 1 to keep every piece.\n")
+        if change_type is None:
+            value_lines += "Change type: all points\n"
+        else:
+            value_lines += (f"Change type: only {change_type} "
+                            f"({CHANGE_TYPE_NAMES[change_type]})\n")
+            if "change_type" not in input_names:
+                value_lines += ("NOTE: the input has no change_type field, so the recipe "
+                                "uses all points.\n")
         report = (
             "=== SUMMARY ===\n"
             f"Input: {input_ply}\n"

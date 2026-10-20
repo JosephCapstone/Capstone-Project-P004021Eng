@@ -15,12 +15,19 @@ Scene layout:
                              M3C2 distance scalar field, larger points
                              (or a mesh with the field carried through)
         /DamageDetail      - optional. Real comparison-cloud geometry near
-                             flagged locations (from extract_damage_detail.py),
-                             colored the same way. Unlike ChangeHighlight
-                             (a magnitude value plotted at baseline positions,
-                             since M3C2's core points are baseline-sourced),
-                             this shows what damage/debris actually looks
-                             like right now.
+                             flagged locations (from extract_damage_detail.py).
+                             Unlike ChangeHighlight (a magnitude value plotted
+                             at baseline positions, since M3C2's core points
+                             are baseline-sourced), this shows what
+                             damage/debris actually looks like right now.
+                             Coloured by the CHANGE TYPE when the file has a
+                             'change_type' field (update 24): red = added,
+                             blue = removed, purple = hole, teal = unmatched -
+                             the same colours as the DamageSites boxes. The
+                             prim has the attributes delta:colorBy and
+                             delta:legend. Without 'change_type' it is
+                             coloured by the magnitude, like ChangeHighlight.
+                             See --detail-color.
         /FlaggedPoints     - optional (--flagged). Only the flagged points of
                              a Stage 6 (Classify) output, coloured like
                              ChangeHighlight. Use it when Classify ran with
@@ -39,11 +46,12 @@ Scene layout:
                              also has a type: added (red box), removed (blue
                              box) or hole (purple box, with its size).
 
-Colours: the layers are coloured by the M3C2 field. When the Stage 6 output
-has a 'change_inward' field (Stage 6 with "Find holes"), that field is used
-instead: its sign has the same meaning on every wall (red = material added,
-blue = material removed), and the points of a hole show as removed. See
-find_color_field().
+Colours: ChangeHighlight and FlaggedPoints are coloured by the M3C2 field.
+When the Stage 6 output has a 'change_inward' field (Stage 6 with "Find
+holes"), that field is used instead: its sign has the same meaning on every
+wall (red = material added, blue = material removed), and the points of a
+hole show as removed. See find_color_field(). DamageDetail is coloured by
+the change type when it has one (see above and type_colormap()).
 
 Units and axes: the stage is written in metres (metersPerUnit = 1) with
 Z up, and /World is the default prim. Without metersPerUnit, a USD reader
@@ -146,7 +154,7 @@ def find_color_field(vertex):
     return find_distance_field(vertex)
 
 
-def read_ply_data(path, warn_if_missing=False):
+def read_ply_data(path, warn_if_missing=False, read_field=True):
     """
     Returns (positions Nx3 float32, scalar_field N float32 or None,
     faces Nx3 int32 or None).
@@ -175,7 +183,7 @@ def read_ply_data(path, warn_if_missing=False):
     ).astype(np.float32)
 
     scalar_field = None
-    field_name = find_color_field(vertex)
+    field_name = find_color_field(vertex) if read_field else None
     if field_name:
         scalar_field = np.asarray(vertex[field_name], dtype=np.float32)
         print(f"  Using scalar field '{field_name}' for coloring.")
@@ -184,7 +192,7 @@ def read_ply_data(path, warn_if_missing=False):
             print(f"  WARNING: every value in '{field_name}' is >= 0 - a real M3C2 "
                   f"signed distance should straddle zero. This may be an uncertainty "
                   f"or magnitude field rather than the real distance field.")
-    elif warn_if_missing:
+    elif warn_if_missing and read_field:
         print(f"  No M3C2/distance field found. Available fields: {list(vertex.data.dtype.names or ())}")
 
     faces = None
@@ -228,6 +236,42 @@ def diverging_colormap(values, clip_percentile=98):
     colors[pos, 1] = 1.0 - t_pos
     colors[pos, 2] = 1.0 - t_pos
 
+    return colors
+
+
+# Colours of the change types (update 24). The same hues as the DamageSites
+# boxes (_site_color): added = red, removed = blue, hole = purple,
+# unmatched = teal. They are solid colours, because a type is a category.
+ADDED_TYPE_COLOR = (1.0, 0.25, 0.15)
+REMOVED_TYPE_COLOR = (0.15, 0.45, 1.0)
+NO_TYPE_COLOR = (0.7, 0.7, 0.7)               # change_type 0 or a value that is not known
+TYPE_LEGEND = "1 added = red; 2 removed = blue; 3 hole = purple; 4 unmatched = teal"
+
+
+def read_change_type(path):
+    """The 'change_type' field of a PLY (int array, one value per vertex),
+    or None when the file has no such field."""
+    ply = PlyData.read(str(path))
+    if "vertex" not in ply:
+        return None
+    vertex = ply["vertex"]
+    if "change_type" not in (vertex.data.dtype.names or ()):
+        return None
+    return np.rint(np.nan_to_num(np.asarray(vertex["change_type"], dtype=np.float64))
+                   ).astype(np.int32)
+
+
+def type_colormap(change_type):
+    """Solid colour per change type: 1 added (red), 2 removed (blue), 3 hole
+    (purple), 4 unmatched (teal). 0 and any other value get a neutral grey.
+    Nearest-neighbour carry can leave a value such as 1.0 on a mesh (Stage 7
+    writes it as a decimal number), so the value is rounded first."""
+    table = {1: ADDED_TYPE_COLOR, 2: REMOVED_TYPE_COLOR,
+             3: HOLE_SITE_COLOR, 4: UNMATCHED_SITE_COLOR}
+    values = np.rint(np.nan_to_num(np.asarray(change_type, dtype=np.float64))).astype(np.int32)
+    colors = np.tile(np.asarray(NO_TYPE_COLOR, dtype=np.float32), (len(values), 1))
+    for value, color in table.items():
+        colors[values == value] = color
     return colors
 
 
@@ -316,7 +360,8 @@ def voxel_downsample(positions, colors, voxel_size):
 
 
 def add_layer(stage, prim_path, ply_path, point_width, warn_if_missing=False,
-              fallback_color=None, uniform_color=None, voxel_size=None):
+              fallback_color=None, uniform_color=None, voxel_size=None,
+              color_by="magnitude"):
     """
     Reads a PLY (point cloud or mesh, auto-detected via read_ply_data) and
     adds it to the stage as either a UsdGeom.Mesh or UsdGeom.Points prim.
@@ -329,11 +374,34 @@ def add_layer(stage, prim_path, ply_path, point_width, warn_if_missing=False,
     voxel_downsample() above). Only applies to point clouds; meshes are
     left untouched, since removing vertices arbitrarily would break face
     topology (holes, degenerate triangles).
+    color_by: "magnitude" (the default: the diverging colormap of the M3C2
+    field) or "type" (solid colour per change type, from the file's
+    'change_type' field - see type_colormap()). With "type", a file with no
+    change_type field falls back to the magnitude.
+
+    Returns "type" or "magnitude" or "flat": what the layer is coloured by.
     """
-    pos, scalar_field, faces = read_ply_data(ply_path, warn_if_missing=warn_if_missing)
+    change_type = read_change_type(ply_path) if (color_by == "type"
+                                                 and uniform_color is None) else None
+    pos, scalar_field, faces = read_ply_data(ply_path, warn_if_missing=warn_if_missing,
+                                             read_field=change_type is None)
+    colored_by = "magnitude"
+    if color_by == "type" and uniform_color is None and change_type is None:
+        print("  NOTE: this file has no 'change_type' field, so the layer is coloured by the "
+              "magnitude. Run Stage 6 (Classify) with 'Find holes', and extract the detail "
+              "again, to colour it by the change type.")
 
     if uniform_color is not None:
         colors = np.tile(uniform_color, (len(pos), 1)).astype(np.float32)
+        colored_by = "flat"
+    elif change_type is not None and len(change_type) == len(pos):
+        colors = type_colormap(change_type)
+        colored_by = "type"
+        counts = ", ".join(f"{name} {int((change_type == value).sum())}"
+                           for value, name in ((1, "added"), (2, "removed"), (3, "hole"),
+                                               (4, "unmatched"), (0, "none"))
+                           if int((change_type == value).sum()))
+        print(f"  Colouring by change_type ({counts}): {TYPE_LEGEND}.")
     elif scalar_field is not None:
         colors = diverging_colormap(scalar_field)
     else:
@@ -344,6 +412,7 @@ def add_layer(stage, prim_path, ply_path, point_width, warn_if_missing=False,
               "during Stage 4. For a mesh, make sure surface_reconstruction.py was "
               "run with --carry-field set.")
         colors = np.tile(fallback_color, (len(pos), 1)).astype(np.float32)
+        colored_by = "flat"
 
     if faces is not None:
         add_mesh(stage, prim_path, pos, colors, faces)
@@ -356,6 +425,7 @@ def add_layer(stage, prim_path, ply_path, point_width, warn_if_missing=False,
                   f"(voxel size {voxel_size}).")
         add_point_cloud(stage, prim_path, pos, colors, point_width)
         print(f"  {len(pos)} points added.")
+    return colored_by
 
 
 def select_flagged(path):
@@ -681,6 +751,16 @@ def main():
                               "comparison-cloud geometry near flagged locations, "
                               "added as a third layer (/World/Compartment/DamageDetail) "
                               "alongside the abstract magnitude-only ChangeHighlight.")
+    parser.add_argument("--detail-color", choices=("auto", "type", "magnitude"),
+                         default="auto",
+                         help="How /World/Compartment/DamageDetail is coloured. auto "
+                              "(default): by the change type (red added, blue removed, "
+                              "purple hole, teal unmatched) when the --detail file has a "
+                              "'change_type' field, else by the magnitude. type: as auto, "
+                              "with a NOTE when the field is missing. magnitude: always by "
+                              "the M3C2/change_inward field (the behaviour of update 23 and "
+                              "earlier). ChangeHighlight and FlaggedPoints always use the "
+                              "magnitude.")
     parser.add_argument("--flagged", default=None,
                          help="Optional: a Stage 6 (Classify) output .ply. Adds "
                               "/World/Compartment/FlaggedPoints with only its flagged "
@@ -762,9 +842,18 @@ def main():
 
     if args.detail:
         print(f"Reading damage detail: {args.detail}")
-        add_layer(stage, "/World/Compartment/DamageDetail", args.detail,
-                  CHANGE_POINT_WIDTH, warn_if_missing=True, fallback_color=FALLBACK_HIGHLIGHT_COLOR,
-                  voxel_size=args.voxel_size)
+        detail_by = add_layer(stage, "/World/Compartment/DamageDetail", args.detail,
+                              CHANGE_POINT_WIDTH, warn_if_missing=True,
+                              fallback_color=FALLBACK_HIGHLIGHT_COLOR,
+                              voxel_size=args.voxel_size,
+                              color_by="magnitude" if args.detail_color == "magnitude"
+                              else "type")
+        detail_prim = stage.GetPrimAtPath("/World/Compartment/DamageDetail")
+        detail_prim.CreateAttribute("delta:colorBy", Sdf.ValueTypeNames.String).Set(
+            "change_type" if detail_by == "type" else "magnitude")
+        if detail_by == "type":
+            detail_prim.CreateAttribute("delta:legend", Sdf.ValueTypeNames.String).Set(
+                TYPE_LEGEND)
 
     if args.flagged:
         print(f"Reading flagged points: {args.flagged}")

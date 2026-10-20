@@ -6,19 +6,41 @@ Defines Stage 8's fields, built field-for-field the same way
 open_export_dialog() builds them in pipeline_applet.py. Last stage - a
 diff-bound stage (pipeline.kind == "diff"), same group as Stages 5-7.
 
+Update 24: the page is arranged in the order of the work, so that it is
+clear which file goes where:
+
+  "How this stage works"   three short lines
+  [Fill empty fields from this diff]   (project mode only)
+  "1. Scene files"        one field for each layer of the USD scene, with a
+                          note that says what the layer shows and which stage
+                          makes the file:
+                            required:  Baseline, Change layer
+                            optional:  Flagged points, Damage sites, Surface
+                                       labels, Damage detail
+  "Scene layers" summary  a live list: for each layer, OK / not used / MISSING
+  [Make the damage detail file]   a box that opens and closes (closed by
+                          default). It has the Extract Damage Detail inputs.
+                          Its result fills the 'Damage detail' field above.
+  "2. Output"             Output .usd, .usdz, downsampling
+
+Field keys are the same as before update 24 (script, baseline, change,
+flagged, clusters, surfaces, detail, output, package_usdz, downsample,
+voxel_size, damage_detail_flagged, damage_detail_comparison,
+damage_detail_radius).
+
 Two picker fields, each with a DIFFERENT groups_fn - the one real
 departure from every other stage's "one field, one picker, same
 project_manager function" pattern:
 
 - "baseline": pm.list_side_candidates(self.pipeline.project, "baseline")
   - always the PROJECT's own baseline cleanup output, regardless of
-    which diff is active, since the exported environment layer should
-    stay the same no matter which diff produced the change highlight.
-    Note the literal string "baseline" here, not
-    self.pipeline.entry["reference"] the way Stage 5's own baseline
-    field worked - Export's baseline is fixed to the project's baseline
-    pipeline specifically, not to whichever pipeline this diff happens
-    to be defined against.
+  which diff is active, since the exported environment layer should
+  stay the same no matter which diff produced the change highlight.
+  Note the literal string "baseline" here, not
+  self.pipeline.entry["reference"] the way Stage 5's own baseline
+  field worked - Export's baseline is fixed to the project's baseline
+  pipeline specifically, not to whichever pipeline this diff happens
+  to be defined against.
 - "change": pm.list_eligible_inputs(self.pipeline, "export")
   - the standard per-diff pattern every other field uses.
 
@@ -26,16 +48,18 @@ project_manager function" pattern:
 project stage. It is picked by hand, or filled automatically by a
 successful "Extract Damage Detail..." run.
 
-"Extract Damage Detail..." is real: it runs extract_damage_detail.py
-via pipeline_core.build_damage_detail_command() (flags confirmed from
-the script's own argparse) through _run_utility_command(), so it has
-the same running lock and Stop support as a stage run. Ported from
-pipeline_applet.py's extract_damage_detail(), with one improvement: the
-Tkinter version blocked the UI with subprocess.run(timeout=180). Its two
-input fields get picker buttons, the same groups the Tkinter dialog
-uses (flagged: the diff's Classify outputs via
+"Extract Damage Detail..." runs extract_damage_detail.py via
+pipeline_core.build_damage_detail_command() (flags confirmed from the
+script's own argparse) through _run_utility_command(), so it has the same
+running lock and Stop support as a stage run. Its two input fields have
+picker buttons (flagged: the diff's Classify outputs via
 list_eligible_inputs(pipeline, "surface"); comparison: the diff's
-comparison side via list_side_candidates()).
+comparison side via list_side_candidates()). Update 24: in project mode
+both fields are filled from the project records (the Classify output of
+this diff, and the comparison cloud that Stage 5 used). A line under them
+says whether the Classify file has the change type: the detail points then
+carry the change type (added, removed, hole, unmatched) of the nearest
+flagged point, and the USD export colours the layer by it.
 
 _build_run() (the main Run button) IS real, with one correction versus
 the source build(): that build() still branches on
@@ -50,9 +74,11 @@ Run standalone:
     pip install PySide6
     python stage8_export_dialog_qt.py
 """
+import html
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QMessageBox, QFileDialog
 
 from qt_stage_base import QStageDialog, QStagePanel, SCRIPTS_DIR, fmt_cm
@@ -66,6 +92,18 @@ try:
     import pipeline_core as core
 except ImportError:
     core = None
+
+
+def _suggested_export_input(pipeline, key):
+    """Update 28. The file that the project records for the Baseline or the
+    Change layer (the same file as the button 'Fill empty fields from this
+    diff'), or "" (never raises)."""
+    if core is None or pipeline is None:
+        return ""
+    try:
+        return core.suggest_export_inputs(pipeline).get(key) or ""
+    except Exception:
+        return ""
 
 
 def _default_damage_detail_radius(pipeline):
@@ -137,77 +175,113 @@ def _default_flagged(pipeline):
     return core.default_flagged_for_diff(pipeline) or ""
 
 
+def _default_detail_flagged(pipeline):
+    """Pre-fill for Extract Damage Detail's 'Classify output': this diff's
+    recorded Stage 6 output, with or without 'Keep all points' - see
+    pipeline_core.default_detail_flagged_for_diff() (update 24)."""
+    if core is None:
+        return ""
+    return core.default_detail_flagged_for_diff(pipeline) or ""
+
+
+def _default_detail_comparison(pipeline):
+    """Pre-fill for Extract Damage Detail's 'New scan': the comparison cloud
+    that this diff's Stage 5 run used - see
+    pipeline_core.default_detail_comparison_for_diff() (update 24)."""
+    if core is None:
+        return ""
+    return core.default_detail_comparison_for_diff(pipeline) or ""
+
+
+# What each layer is called in the summary list, in the order of the USD scene.
+LAYER_NAMES = {
+    "baseline": "Baseline",
+    "change": "ChangeHighlight",
+    "flagged": "FlaggedPoints",
+    "clusters": "DamageSites",
+    "surfaces": "Surface labels (on DamageSites)",
+    "detail": "DamageDetail",
+}
+GREEN, RED, GREY = "#008844", "#cc0000", "#777777"
+
+
 class Stage8ExportFieldsMixin:
+
+    def _add_heading(self, text):
+        label = QLabel(text)
+        label.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        self.form.addWidget(label)
+        return label
 
     def _build_export_fields(self, pipeline=None):
         self.add_pipeline_label(pipeline)
 
-        default_script = str(SCRIPTS_DIR / "usd_export.py")
-        self.add_file_field("script", "USD export script (.py):", [("Python files", "*.py")],
-                             default=default_script)
+        self.add_hint("Stage 8 makes one USD scene from files of the earlier stages. Each "
+                      "file that you select becomes one layer of the scene. Select the two "
+                      "required files first. The list 'Scene layers' shows what the scene "
+                      "will have.")
+        self.add_conditional_project_button(
+            "Fill empty fields from this diff",
+            lambda p: p is not None and getattr(p, "kind", None) == "diff",
+            self._fill_from_project)
 
-        self.add_file_field("baseline", "Baseline .ply:", [("PLY files", "*.ply")])
+        # -- 1. Scene files ----------------------------------------------------
+        self._add_heading("1. Scene files")
+
+        self.add_file_field("baseline", "Baseline .ply (required):", [("PLY files", "*.ply")])
         self.add_project_picker_button(
             "baseline", lambda: pm.list_side_candidates(self.pipeline.project, "baseline"))
+        self.register_auto_default(
+            "baseline", lambda p: _suggested_export_input(p, "baseline"), fill_now=True)
 
         change_edit = self.add_file_field(
-            "change", "Change-highlight .ply:", [("PLY files", "*.ply")])
+            "change", "Change layer .ply (required):", [("PLY files", "*.ply")])
         self.add_project_picker_button(
             "change", lambda: pm.list_eligible_inputs(self.pipeline, "export"))
+        self.register_auto_default(
+            "change", lambda p: _suggested_export_input(p, "change"), fill_now=True)
 
-        self.add_file_field("flagged", "Flagged points (Classify .ply, optional):",
+        self.add_file_field("flagged", "Flagged points .ply (optional):",
                             [("PLY files", "*.ply")], default=_default_flagged(pipeline))
         self.register_auto_default("flagged", _default_flagged)
         self.add_project_picker_button(
             "flagged", lambda: pm.list_eligible_inputs(self.pipeline, "surface"))
-        self.add_hint(
-            "Optional. A Stage 6 (Classify) output. The export adds the layer "
-            "/World/Compartment/FlaggedPoints with only its flagged points (in a damage "
-            "site, or above the threshold when clustering was off), coloured like the "
-            "change layer. Use it when Classify ran with 'Keep all points': Stage 7 then "
-            "makes a surface of all points for Change-highlight, and this layer shows only "
-            "the damage. In project mode, the app fills this field when the Classify run "
-            "of this diff used 'Keep all points'. Leave blank to export without this layer.")
 
-        self.add_file_field("clusters", "Damage sites (.clusters.json, optional):",
+        self.add_file_field("clusters", "Damage sites (.json, optional):",
                             [("Cluster summary", "*.clusters.json"), ("JSON files", "*.json")],
                             default=_default_clusters_json(pipeline))
         self.register_auto_default("clusters", _default_clusters_json)
         change_edit.textChanged.connect(self._fill_clusters_from_change)
-        self.add_hint(
-            "Optional. The cluster summary that Stage 6 (Classify) writes next to its "
-            "output (<name>.clusters.json). The export adds one see-through box for each "
-            "damage site at /World/Compartment/DamageSites: at the centre of the site, "
-            "with the size of the site, red for the largest change. Each box keeps its point "
-            "count and magnitudes as 'delta:' properties. In project mode, the app fills "
-            "this from the Classify output of this diff. Leave blank to export without "
-            "markers.")
 
-        self.add_file_field("surfaces", "Surface labels (Stage 4 Segment .ply, optional):",
-                            [("PLY files", "*.ply")], default=_default_surfaces(pipeline))
-        self.register_auto_default("surfaces", _default_surfaces)
-        self.add_project_picker_button(
-            "surfaces", lambda: pm.list_side_candidates(self.pipeline.project,
-                                                        self.pipeline.entry["reference"]))
-        self.add_hint(
-            "Optional. Used only with 'Damage sites'. A Stage 4 (Segment) output of the "
-            "reference scan of this diff (<name>_envelope_filtered.ply or "
-            "<name>_classified.ply). Each damage site then shows the surface it is on, for "
-            "example 'Site 03 - wall_2', with the 'delta:surface' property. The names come "
-            "from the manifest.json in the same folder. In project mode, the app fills this "
-            "with the reference cloud that Stage 5 used. Leave blank to export without "
-            "surface labels.")
+        self.add_file_field("detail", "Damage detail .ply (optional):", [("PLY files", "*.ply")])
 
-        section_label = QLabel("Extract Damage Detail (optional, before exporting):")
-        section_label.setStyleSheet("font-weight: bold;")
-        self.form.addWidget(section_label)
+        self._scene_summary = QLabel()
+        self._scene_summary.setWordWrap(True)
+        self._scene_summary.setTextFormat(Qt.RichText)
+        self.form.addWidget(self._scene_summary)
+
+        # -- Make the damage detail file (optional, closed by default) ---------
+        self._detail_toggle = QPushButton()
+        self._detail_toggle.setCheckable(True)
+        self._detail_toggle.toggled.connect(self._on_detail_toggled)
+        self.form.addWidget(self._detail_toggle)
+        self.detail_section = self.begin_section()
+        self.add_hint("This step makes the file for the 'Damage detail' field. Click the "
+                      "button when the three fields are correct.")
         self.add_file_field(
-            "damage_detail_flagged", "Flagged (Classify output) .ply:", [("PLY files", "*.ply")])
+            "damage_detail_flagged", "Classify output .ply (Stage 6):", [("PLY files", "*.ply")],
+            default=_default_detail_flagged(pipeline))
+        self.register_auto_default("damage_detail_flagged", _default_detail_flagged)
         self.add_project_picker_button(
             "damage_detail_flagged", lambda: pm.list_eligible_inputs(self.pipeline, "surface"))
+        self._detail_status = QLabel()
+        self._detail_status.setWordWrap(True)
+        self._detail_status.setStyleSheet("font-size: 8pt;")
+        self.form.addWidget(self._detail_status)
         self.add_file_field(
-            "damage_detail_comparison", "Comparison cloud (Stage 3 output) .ply:",
-            [("PLY files", "*.ply")])
+            "damage_detail_comparison", "New scan (comparison) .ply:", [("PLY files", "*.ply")],
+            default=_default_detail_comparison(pipeline))
+        self.register_auto_default("damage_detail_comparison", _default_detail_comparison)
         self.add_project_picker_button(
             "damage_detail_comparison",
             lambda: pm.list_side_candidates(self.pipeline.project,
@@ -216,51 +290,318 @@ class Stage8ExportFieldsMixin:
         self.add_length_field("damage_detail_radius", "Radius (cm):", default_m=radius_default,
                               min_cm=0.1, max_cm=200)
         self.register_auto_default("damage_detail_radius", _default_damage_detail_radius)
-        self.add_hint(
-            "Radius: how far around each flagged point to pull real geometry from the "
-            "comparison cloud, in the same units as the point cloud - pre-filled from this "
-            "diff's own recorded Normal scale (Stage 5's own M3C2 parameter) when known, "
-            "since that's already a reasonable per-point neighborhood size for this data. "
-            "Flagged .ply: pick this from the Classify group when using 'Choose from "
-            "project...' elsewhere in this app, not Diff - Classify's own output is what "
-            "carries which points were actually flagged as damage; Diff's raw M3C2 result "
-            "has no flagged/not-flagged distinction yet.")
+        # Update 29: the explanations are in "?" popups (what it does, what the
+        # options do, when to change it).
+        self.add_help(
+            "baseline",
+            "Layer 'Baseline': the room, in grey. It comes from Stage 3 (Cleanup) or "
+            "Stage 4 (Segment) of the baseline scan.",
+            when="Change it to use another baseline file. The same file is correct for "
+                 "every diff.")
+        self.add_help(
+            "change",
+            "Layer 'ChangeHighlight': the change, in colour. It comes from Stage 7 "
+            "(Surface) of this diff. You can also use the Stage 6 (Classify) output. The "
+            "file must have the field change_inward or the M3C2 distance.",
+            when="Change it to show another change file.")
+        self.add_help(
+            "flagged",
+            "Layer 'FlaggedPoints': only the points of the damage. It comes from Stage 6 "
+            "(Classify) of this diff, when it ran with 'Keep all points'. The application "
+            "fills this field in that case.",
+            effects=[
+                ("Set", "the scene has the layer."),
+                ("Empty", "the scene is made without the layer."),
+            ],
+            when="The change layer is a Stage 7 surface of all points. Then this layer "
+                 "shows the damage points alone.")
+        self.add_help(
+            "clusters",
+            "Layer 'DamageSites': one see-through box for each damage site (red = added, "
+            "blue = removed, purple = hole, teal = unmatched). It comes from the "
+            ".clusters.json file that Stage 6 saves next to its output. The application "
+            "fills this field from the Classify output of this diff. Each box keeps its "
+            "point count and sizes as 'delta:' properties.",
+            effects=[
+                ("Set", "the scene has the boxes."),
+                ("Empty", "the scene is made without the boxes."),
+            ],
+            when="Change it to use the file of another Classify run.")
+        self.add_help(
+            "detail",
+            "Layer 'DamageDetail': the points of the new scan at the damage, coloured by "
+            "change type. It comes from the box 'Make the damage detail file' below. The "
+            "button in that box fills this field.",
+            effects=[
+                ("Set", "the scene has the layer."),
+                ("Empty", "the scene is made without the layer."),
+            ],
+            when="You want to see the real points at the damage sites. You can also select "
+                 "a file that you made before.")
+        self.add_help(
+            "damage_detail_flagged",
+            "The Classify output (Stage 6). It gives the places of the damage. The script "
+            "takes the points of the new scan that are near these places. Each point gets "
+            "the change type of the nearest place: added, removed, hole or unmatched. The "
+            "change type is the best value for damage, because it has the same meaning "
+            "on every wall.",
+            when="Change it to use another Classify run. The file must have the "
+                 "change_type field (Stage 6 with 'Find holes').")
+        self.add_help(
+            "damage_detail_comparison",
+            "The new scan (the comparison cloud). The script takes the real points for the "
+            "detail file from it.",
+            when="Change it to use another scan. In project mode the box fills from the "
+                 "pipeline.")
+        self.add_help(
+            "damage_detail_radius",
+            "The distance from each damaged place in which the script takes points of the "
+            "new scan. The distance is measured from the place in the baseline. The "
+            "pre-filled value is the Normal scale of Stage 5.",
+            effects=[
+                ("Smaller", "fewer points. Material that moved farther is not found."),
+                ("Larger", "more points. Points of nearby surfaces can come in."),
+            ],
+            when="Use a radius that is larger than the largest change.")
+
         extract_btn = QPushButton("Extract Damage Detail...")
         extract_btn.clicked.connect(self._extract_damage_detail)
         self.form.addWidget(extract_btn)
+        self.end_section()
 
-        self.add_file_field("detail", "Damage detail .ply (optional):", [("PLY files", "*.ply")])
-        self.add_hint(
-            "Optional. Output from extract_damage_detail.py - real comparison-cloud "
-            "geometry near flagged locations, added as a third layer alongside "
-            "ChangeHighlight. Unlike ChangeHighlight (a magnitude value plotted at baseline "
-            "positions), this shows what the damage/debris actually looks like right now. "
-            "Leave blank to skip - the scene works fine without it. Not a tracked project "
-            "stage - always picked by hand, or filled automatically by a successful "
-            "'Extract Damage Detail...' run above.")
-
+        # -- 2. Output ---------------------------------------------------------
+        self._add_heading("2. Output")
         output_default = self.resolve_project_output_default(pipeline, "export", ".usd")
         self.add_save_field("output", "Output .usd:", default_ext=".usd", default=output_default)
         self.register_auto_default(
             "output", lambda p: self.resolve_project_output_default(p, "export", ".usd"))
 
+        self.add_help(
+            "output",
+            "The USD file that Stage 8 writes.",
+            when="Change it to save under another name. In project mode the name comes "
+                 "from the pipeline.")
+
+        # Settings that normally stay at their default values (closed block).
+        self.begin_advanced("Advanced")
+        default_script = str(SCRIPTS_DIR / "usd_export.py")
+        self.add_file_field("script", "USD export script (.py):", [("Python files", "*.py")],
+                             default=default_script)
+
+        # Update 28: Surface labels and .usdz are in Advanced.
+        self.add_file_field("surfaces", "Surface labels .ply (optional):",
+                            [("PLY files", "*.ply")], default=_default_surfaces(pipeline))
+        self.register_auto_default("surfaces", _default_surfaces)
+        self.add_project_picker_button(
+            "surfaces", lambda: pm.list_side_candidates(self.pipeline.project,
+                                                        self.pipeline.entry["reference"]))
+
         self.add_checkbox("package_usdz", "Also package as .usdz")
-        self.add_hint(
-            "Most web, AR, and mobile USD viewers only accept .usdz, not raw .usd - check "
-            "this if you want to preview the result without Omniverse. Saved next to the "
-            ".usd file, same name.")
 
         self.add_checkbox(
             "downsample", "Downsample point cloud layers (reduces file size / viewer load)")
         self.add_length_field("voxel_size", "Voxel size (cm):", min_cm=0.1, max_cm=100)
-        self.add_hint(
-            "Off by default. Keeps one representative point per voxel cell - removes "
-            "redundant near-duplicate points from overlapping scan passes, not real detail, "
-            "as long as the voxel size stays smaller than the smallest feature you care "
-            "about seeing. Doesn't affect mesh layers. Use point_spacing.py for a sense of "
-            "your data's point spacing before choosing a value.")
+
+        self.add_help(
+            "script",
+            "The Python script that writes the USD file.",
+            when="Change it only to use a changed copy of the script.")
+        self.add_help(
+            "surfaces",
+            "Adds the name of the surface (for example 'Site 03 - wall_2') to each damage "
+            "site. It needs 'Damage sites'. It comes from Stage 4 (Segment) of the "
+            "reference scan (<name>_envelope_filtered.ply or <name>_classified.ply). The "
+            "names come from the manifest.json in the same folder. The application fills "
+            "this field with the reference cloud that Stage 5 used.",
+            effects=[
+                ("Set", "each damage site has a surface name."),
+                ("Empty", "the damage sites have no surface name."),
+            ],
+            when="You want surface names on the damage sites.")
+        self.add_help(
+            "package_usdz",
+            "Also writes a .usdz package next to the .usd file, with the same name.",
+            effects=[
+                ("On", "you get a .usdz file. Most web, AR and mobile USD viewers accept "
+                       "only .usdz."),
+                ("Off", "only the .usd file is written."),
+            ],
+            when="You want to look at the result without Omniverse.")
+        self.add_help(
+            "downsample",
+            "Keeps one representative point for each voxel cell in the point cloud layers. "
+            "This removes near-duplicate points from overlapping scan passes. It does not "
+            "change the mesh layers.",
+            effects=[
+                ("On", "the file is smaller and the viewer loads faster."),
+                ("Off", "all points stay."),
+            ],
+            when="The file is too large or the viewer is slow. Use point_spacing.py to "
+                 "see the point spacing of your data before you choose a voxel size.")
+        self.add_help(
+            "voxel_size",
+            "The size of the voxel cell for 'Downsample'. It is not used when the box is "
+            "off.",
+            effects=[
+                ("Smaller", "more points stay. The file is larger."),
+                ("Larger", "fewer points stay. The file is smaller, but small features can "
+                           "be lost."),
+            ],
+            when="Keep the voxel size smaller than the smallest feature that you must see.")
+
+        self.end_advanced()
+        self.keep_field_order("script", "baseline", "change")
 
         self.form.addStretch(1)
+
+        # Live lists. The summary and the status line follow the fields.
+        for key in ("baseline", "change", "flagged", "clusters", "surfaces", "detail"):
+            self.fields[key].widget.textChanged.connect(self._update_scene_summary)
+        for key in ("damage_detail_flagged", "damage_detail_radius"):
+            self.fields[key].widget.textChanged.connect(self._update_detail_status)
+        self.fields["detail"].widget.textChanged.connect(self._open_detail_box_if_filled)
+        self.detail_section.setVisible(False)
+        self._on_detail_toggled(False)
+        self._update_scene_summary()
+        self._update_detail_status()
+
+    # -- layout helpers ---------------------------------------------------------
+
+    def _on_detail_toggled(self, opened):
+        """Opens or closes the box 'Make the damage detail file'."""
+        self.detail_section.setVisible(bool(opened))
+        self._detail_toggle.setText(
+            "Hide: make the damage detail file" if opened else
+            "Show: make the damage detail file (optional)")
+
+    def _open_detail_box_if_filled(self, *_args):
+        """A path in 'Damage detail' (typed, or made by the button) opens the box."""
+        if self.fields["detail"].get().strip() and not self._detail_toggle.isChecked():
+            self._detail_toggle.setChecked(True)
+
+    # -- live lists -------------------------------------------------------------
+
+    def _layer_states(self):
+        """[(layer name, text, colour)] for the summary list, from the fields."""
+        def path(key):
+            return self.fields[key].get().strip()
+
+        def state(key, required):
+            value = path(key)
+            if not value:
+                return ("MISSING", RED) if required else ("not used", GREY)
+            if not Path(value).is_file():
+                return ("FILE NOT FOUND", RED)
+            return ("OK", GREEN)
+
+        rows = []
+        for key in ("baseline", "change"):
+            text, colour = state(key, True)
+            rows.append((LAYER_NAMES[key], text, colour))
+
+        text, colour = state("flagged", False)
+        if text == "OK" and path("change") and \
+                self._same_file(path("flagged"), path("change")):
+            text, colour = "not used (same file as the change layer)", GREY
+        rows.append((LAYER_NAMES["flagged"], text, colour))
+
+        text, colour = state("clusters", False)
+        rows.append((LAYER_NAMES["clusters"], text, colour))
+
+        text, colour = state("surfaces", False)
+        if text == "OK" and not path("clusters"):
+            text, colour = "not used (it needs 'Damage sites')", GREY
+        rows.append((LAYER_NAMES["surfaces"], text, colour))
+
+        text, colour = state("detail", False)
+        if text == "OK":
+            has_type = core.flagged_has_change_type(path("detail")) if core else None
+            if has_type is True:
+                text = "OK - coloured by change type"
+            elif has_type is False:
+                text = "OK - coloured by the magnitude (the file has no change type)"
+        rows.append((LAYER_NAMES["detail"], text, colour))
+        return rows
+
+    @staticmethod
+    def _same_file(a, b):
+        try:
+            return Path(a).resolve() == Path(b).resolve()
+        except OSError:
+            return False
+
+    def _update_scene_summary(self, *_args):
+        rows = self._layer_states()
+        lines = "".join(
+            f"<tr><td style='padding-right:12px'>{html.escape(name)}</td>"
+            f"<td style='color:{colour}'>{html.escape(text)}</td></tr>"
+            for name, text, colour in rows)
+        self._scene_summary.setText(
+            "<b>Scene layers</b> (what Run will make)"
+            f"<table style='font-size:8pt'>{lines}</table>")
+
+    def _update_detail_status(self, *_args):
+        """The line under 'Classify output .ply': does the file have the change
+        type, and is the radius larger than the largest change."""
+        value = self.fields["damage_detail_flagged"].get().strip()
+        text, colour = "", GREY
+        if value and core is not None:
+            has_type = core.flagged_has_change_type(value)
+            if has_type is True:
+                text, colour = ("Change type: found. The detail points get the change type "
+                                "of the nearest flagged point.", GREEN)
+            elif has_type is False:
+                text, colour = ("Change type: NOT found. Run Stage 6 with 'Find holes' to "
+                                "get it. Without it, the detail points get the M3C2 "
+                                "distance (the magnitude) only.", RED)
+            elif Path(value).is_file():
+                text, colour = "The header of this file cannot be read.", RED
+            largest = core.largest_change_in_classify(value)
+            if largest is not None:
+                try:
+                    radius = float(self.fields["damage_detail_radius"].get())
+                except ValueError:
+                    radius = None
+                if radius is not None and radius < largest:
+                    text += (f" The largest change is {largest * 100:.1f} cm and the radius "
+                             f"is {radius * 100:.1f} cm: make the radius larger.")
+                    colour = RED
+        self._detail_status.setText(text)
+        self._detail_status.setStyleSheet(f"font-size: 8pt; color: {colour};")
+
+    # -- buttons ----------------------------------------------------------------
+
+    def _fill_from_project(self, pipeline):
+        """'Fill empty fields from this diff': puts the files that the project
+        records into the EMPTY fields Baseline and Change layer, and runs the
+        automatic fill of the optional fields. A field that has a file is not
+        changed. The user selects the files with 'Choose from project...' as
+        before; this button only saves the clicks."""
+        if core is None or pipeline is None:
+            return
+        suggestion = core.suggest_export_inputs(pipeline)
+        filled, kept, missing = [], [], []
+        for key, name in (("baseline", "Baseline"), ("change", "Change layer")):
+            if self.fields[key].get().strip():
+                kept.append(name)
+            elif suggestion[key]:
+                self.fields[key].set(suggestion[key])
+                filled.append(f"{name}: {suggestion[key + '_from']}")
+            else:
+                missing.append(name)
+        self._refresh_auto_defaults(only_empty=True)
+        lines = []
+        if filled:
+            lines.append("Filled:\n  " + "\n  ".join(filled))
+        if kept:
+            lines.append("Not changed (the field has a file): " + ", ".join(kept))
+        if missing:
+            lines.append("No file found in the project for: " + ", ".join(missing)
+                         + ".\nRun the earlier stage, or use 'Choose from project...' "
+                         "or Browse.")
+        if not lines:
+            lines.append("Nothing to fill.")
+        QMessageBox.information(self, "Fill empty fields from this diff", "\n\n".join(lines))
 
     def _fill_clusters_from_change(self, change_path):
         """If the Change input is a Classify output with a cluster summary
@@ -284,8 +625,11 @@ class Stage8ExportFieldsMixin:
         tracking."""
         script = self.require("script", "USD export script")
         baseline = self.require_existing_file("baseline", "Baseline .ply")
-        change = self.require("change", "Change-highlight .ply")
+        change = self.require("change", "Change layer .ply")
         detail = self.fields["detail"].get().strip() or None
+        if detail and not Path(detail).is_file():
+            raise ValueError(f"'Damage detail .ply' points at a file that does not exist:\n"
+                             f"{detail}\n\nClear the field to export without this layer.")
         clusters = self.fields["clusters"].get().strip() or None
         if clusters and not Path(clusters).is_file():
             raise ValueError(f"'Damage sites (.clusters.json)' points at a file that does "
@@ -314,6 +658,9 @@ class Stage8ExportFieldsMixin:
                 raise ValueError("Voxel size must be a number in cm when downsampling is "
                                  "checked.")
 
+        detail_has_type = (core.flagged_has_change_type(detail)
+                           if (detail and core is not None) else None)
+
         active_pipeline = self.get_active_pipeline_for_run()
         cmd = core.build_export_command(script, baseline, change, output,
                                          package_usdz=package_usdz, detail_ply=detail,
@@ -326,7 +673,11 @@ class Stage8ExportFieldsMixin:
             "=== SUMMARY ===\n"
             f"Baseline used: {baseline}\n"
             f"Change-highlight used: {change}\n"
-            + (f"Damage detail used: {detail}\n" if detail else "No damage detail layer.\n")
+            + (f"Damage detail used: {detail}"
+               + (" (coloured by change type)\n" if detail_has_type is True else
+                  " (coloured by the magnitude: the file has no change type)\n"
+                  if detail_has_type is False else "\n")
+               if detail else "No damage detail layer.\n")
             + (f"Flagged points from: {flagged}\n" if flagged else
                "Flagged points not used: the file is the same as the change input.\n"
                if flagged_same_as_change else "")
@@ -352,7 +703,10 @@ class Stage8ExportFieldsMixin:
             "should show the change regions colored blue (negative) to "
             "red (positive) by magnitude"
             + (", and .../DamageDetail should show the real current geometry "
-               "in the same colors" if detail else "")
+               + ("coloured by change type: red = added, blue = removed, purple = hole, "
+                  "teal = unmatched" if detail_has_type is True else
+                  "in the same colors as ChangeHighlight")
+               if detail else "")
             + (". .../FlaggedPoints shows only the flagged points; hide "
                "ChangeHighlight in the Stage panel to see only the damage" if flagged else "")
             + (". .../DamageSites has one see-through box per damage site - select a "
@@ -375,13 +729,12 @@ class Stage8ExportFieldsMixin:
         flagged = self.fields["damage_detail_flagged"].get().strip()
         comparison = self.fields["damage_detail_comparison"].get().strip()
         if not flagged or not Path(flagged).exists():
-            QMessageBox.critical(self, "No flagged file",
-                                 "Enter a valid 'Flagged (Classify output) .ply' file first.")
+            QMessageBox.critical(self, "No Classify file",
+                                 "Enter a valid 'Classify output .ply (Stage 6)' file first.")
             return
         if not comparison or not Path(comparison).exists():
-            QMessageBox.critical(self, "No comparison file",
-                                 "Enter a valid 'Comparison cloud (Stage 3 output) .ply' "
-                                 "file first.")
+            QMessageBox.critical(self, "No new scan file",
+                                 "Enter a valid 'New scan (comparison) .ply' file first.")
             return
         try:
             radius = float(self.fields["damage_detail_radius"].get())
@@ -420,6 +773,7 @@ class Stage8ExportFieldsMixin:
                 return
             auto_named = False
 
+        has_type = core.flagged_has_change_type(flagged)
         cmd = core.build_damage_detail_command(script_path, flagged, comparison, save_path,
                                                radius)
 
@@ -438,6 +792,11 @@ class Stage8ExportFieldsMixin:
                 f"Saved to:\n{save_path}\n\n"
                 + ("This is a project run. The app named the file and put it in the "
                    "export folder of this diff.\n\n" if auto_named else "")
+                + ("Each point has the change type of the nearest flagged point. The "
+                   "USD export colours the layer by it.\n\n" if has_type is True else
+                   "The Classify file has no change type, so each point has the M3C2 "
+                   "distance only. Run Stage 6 with 'Find holes' to get the change "
+                   "type.\n\n" if has_type is False else "")
                 + "'Damage detail .ply' now shows this result. To try a different "
                 "radius, change it and extract again. Nothing is final until you run "
                 "Export.")

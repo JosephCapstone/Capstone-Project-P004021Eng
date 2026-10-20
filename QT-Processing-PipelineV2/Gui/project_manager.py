@@ -436,6 +436,193 @@ def add_scan(project, label, source_path, source_type, link_raw="copy"):
     return scan_id
 
 
+# ---------------------------------------------------------------------------
+# Public API - import of a point cloud that was made outside the pipeline
+# (Update 23)
+# ---------------------------------------------------------------------------
+
+IMPORTED_CLOUD_SOURCE_TYPE = "ply"
+
+
+def _record_imported_cloud(handle, source_path, normalize):
+    """
+    Makes the standard point cloud file for an imported PLY file and records it
+    as the output of the 'slam' stage (Stage 1) of this pipeline.
+
+    normalize(input_path, output_path) -> dict is given by the caller, so this
+    module stays free of numpy and plyfile (see the module docstring). The
+    dict is the result of scripts/import_pointcloud.py normalize_ply(). Keys
+    that it has are copied to the stage record: n_points, fields, extent,
+    median_spacing. The stage record also gets imported=True and the file
+    name of the original, so a later reader can tell that Stage 1 did not run.
+
+    Raises ProjectError (with the text of the problem) if normalize() fails.
+    The stage is then marked 'failed'.
+    """
+    out_rel = get_output_path(handle, "slam", ".ply")
+    out_abs = handle.project.root / out_rel
+    start_stage(handle, "slam", params={"imported": True, "source_file": Path(source_path).name})
+    try:
+        info = normalize(str(source_path), str(out_abs)) or {}
+    except Exception as exc:                                  # noqa: BLE001
+        fail_stage(handle, "slam", str(exc))
+        raise ProjectError(f"The point cloud could not be imported: {exc}")
+
+    extra = {
+        "imported": True,
+        "source_type": IMPORTED_CLOUD_SOURCE_TYPE,
+        "source_file": Path(source_path).name,
+    }
+    for key in ("n_points", "fields", "extent", "median_spacing"):
+        if key in info:
+            extra[key] = info[key]
+    if info.get("notes"):
+        extra["import_notes"] = list(info["notes"])
+    complete_stage(handle, "slam", out_abs, extra_fields=extra)
+    return info
+
+
+def create_project_from_cloud(root_dir, compartment_name, source_path, normalize, link_raw="copy"):
+    """
+    Like create_project(), but the source is a point cloud PLY file (made
+    outside the pipeline) and not a sensor recording. The original file goes to
+    baseline/00_raw/ (source_type 'ply'). The standard point cloud made from
+    it is recorded as the output of Stage 1 (SLAM), marked imported=True. Stage 2
+    (Level) is then the next stage. Stage 1 is not run.
+
+    If the import fails, the project folder that this call made is removed and
+    ProjectError is raised. Returns the Project object.
+    """
+    if link_raw == "move":
+        raise ProjectError("An import of a point cloud cannot use link_raw='move': "
+                           "a failed import removes the new folder, and the original file "
+                           "must not be lost. Use 'copy' or 'link'.")
+    source_path = Path(source_path)
+    if not source_path.is_file():
+        raise ProjectError(f"Source file does not exist: {source_path}")
+
+    project_id = f"{compartment_name}_{_today_str()}"
+    root = Path(root_dir) / project_id
+    if root.exists():
+        raise ProjectError(f"Project folder already exists: {root}")
+    root.mkdir(parents=True)
+
+    try:
+        baseline_root = root / "baseline"
+        _make_raw_and_stage_folders(baseline_root, BASELINE_SCAN_STAGE_FOLDERS)
+        raw_dest = baseline_root / RAW_FOLDER / source_path.name
+        import_method = _import_raw_source(source_path, raw_dest, link_raw)
+
+        now = _now_iso()
+        data = {
+            "project_id": project_id,
+            "compartment": compartment_name,
+            "created": now,
+            "updated": now,
+            "schema_version": SCHEMA_VERSION,
+            "baseline": {
+                "raw": {
+                    "path": f"baseline/{RAW_FOLDER}/{source_path.name}",
+                    "source_type": IMPORTED_CLOUD_SOURCE_TYPE,
+                    "import_method": import_method,
+                },
+                "stages": {name: {"status": "not_started"} for name in BASELINE_SCAN_STAGE_NAMES},
+                "is_baseline_candidate": True,
+                "promoted": False,
+            },
+            "scans": {},
+            "diffs": {},
+        }
+        project = Project(data, root)
+        save_project(project)
+        _record_imported_cloud(project.baseline_handle(), source_path, normalize)
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    return project
+
+
+def add_scan_from_cloud(project, label, source_path, normalize, link_raw="copy"):
+    """
+    Like add_scan(), but the source is a point cloud PLY file. See
+    create_project_from_cloud(). If the import fails, the scan folder and the
+    scan entry that this call made are removed and ProjectError is raised.
+    Returns the new scan_id.
+    """
+    if link_raw == "move":
+        raise ProjectError("An import of a point cloud cannot use link_raw='move': "
+                           "a failed import removes the new folder, and the original file "
+                           "must not be lost. Use 'copy' or 'link'.")
+    source_path = Path(source_path)
+    if not source_path.is_file():
+        raise ProjectError(f"Source file does not exist: {source_path}")
+
+    scan_id = f"{label}_{_today_str()}"
+    if scan_id in project.data.get("scans", {}):
+        raise ProjectError(f"A scan named '{scan_id}' already exists in this project.")
+    scan_root = project.root / "scans" / scan_id
+    if scan_root.exists():
+        raise ProjectError(f"Scan folder already exists: {scan_root}")
+
+    try:
+        _make_raw_and_stage_folders(scan_root, BASELINE_SCAN_STAGE_FOLDERS)
+        raw_dest = scan_root / RAW_FOLDER / source_path.name
+        import_method = _import_raw_source(source_path, raw_dest, link_raw)
+        project.data.setdefault("scans", {})[scan_id] = {
+            "raw": {
+                "path": f"scans/{scan_id}/{RAW_FOLDER}/{source_path.name}",
+                "source_type": IMPORTED_CLOUD_SOURCE_TYPE,
+                "import_method": import_method,
+            },
+            "stages": {name: {"status": "not_started"} for name in BASELINE_SCAN_STAGE_NAMES},
+        }
+        save_project(project)
+        _record_imported_cloud(project.scan_handle(scan_id), source_path, normalize)
+    except BaseException:
+        project.data.get("scans", {}).pop(scan_id, None)
+        shutil.rmtree(scan_root, ignore_errors=True)
+        save_project(project)
+        raise
+    return scan_id
+
+
+def skip_level(handle, reason=None):
+    """
+    Skips Stage 2 (Level) for a baseline or scan pipeline (Update 23). Stage 2
+    is recorded as complete with skipped=True, and its output is the output of
+    Stage 1 (the same file; nothing is copied). Stage 3 (Cleanup) then reads
+    the Stage 1 file, because get_input_for_stage(handle, "cleanup") returns
+    the recorded output of 'level'.
+
+    Use it for a cloud that is already levelled, or for a pair of clouds that
+    are already registered to each other (Stage 2 turns each cloud on its own
+    floor, and two different turns break the registration).
+
+    Raises ProjectError if the pipeline is a diff, if Stage 1 is not complete,
+    if the Stage 1 file is missing, or if Stage 2 has already run (a real run
+    of Level is not replaced by a skip). A skip that was made before can be
+    made again. To undo a skip, run Stage 2: it replaces the record.
+    Returns the project-relative path of the Stage 2 output.
+    """
+    if handle.kind not in ("baseline", "scan"):
+        raise ProjectError("Level can be skipped only for a baseline or a scan pipeline.")
+    stages = handle.entry["stages"]
+    slam = stages.get("slam", {})
+    if slam.get("status") != "complete" or not slam.get("output"):
+        raise ProjectError("Stage 1 must be complete before Level can be skipped.")
+    slam_abs = handle.project.root / slam["output"]
+    if not slam_abs.is_file():
+        raise ProjectError(f"The Stage 1 file does not exist: {slam_abs}")
+    level = stages.get("level", {})
+    if level.get("status") == "complete" and not level.get("skipped"):
+        raise ProjectError("Level has already run for this pipeline. Its result is not "
+                           "replaced by a skip. Run Stage 2 again if you want a new result.")
+    text = reason or "Level skipped: the Stage 1 output is used as the Level output."
+    start_stage(handle, "level", params={"skipped": True})
+    complete_stage(handle, "level", slam_abs, extra_fields={"skipped": True, "skip_reason": text})
+    return handle.entry["stages"]["level"]["output"]
+
+
 def add_diff(project, label, reference, comparison):
     """
     Adds a new diff pipeline (Section 11): creates
@@ -795,10 +982,45 @@ def get_baseline_cleanup_output(project):
     return str(project.root / output)
 
 
+def stage_name_prefix(handle, stage_name):
+    """
+    Update 27. The start of the file name of this pipeline's stage output.
+
+    A baseline or a scan gives <compartment>_<kind>_<stage>_ (for example
+    'roomA_baseline_cleanup_' or 'roomA_scan_cleanup_'). The file name then
+    says which pipeline made the file, also when the file is outside its
+    folder (CloudCompare, Blender, a zip file). A diff pipeline gives
+    <compartment>_<stage>_ as before: its stage names (diff, classify,
+    surface, export) are used in no other pipeline, so they are not
+    ambiguous. A scan ID is not in the name (several scans of one project
+    still have the same kind).
+    """
+    compartment = handle.project.data["compartment"]
+    if handle.kind in ("baseline", "scan"):
+        return f"{compartment}_{handle.kind}_{stage_name}_"
+    return f"{compartment}_{stage_name}_"
+
+
+def _stage_name_prefixes(handle, stage_name):
+    """
+    Update 27. Every prefix that a numbered output of this stage can have:
+    the new prefix first, then (baseline and scan only) the prefix that was
+    used before update 27. A file with the old prefix keeps its name. It is
+    still listed, and its number still counts, so a new file never gets a
+    number that an old file has.
+    """
+    prefixes = [stage_name_prefix(handle, stage_name)]
+    if handle.kind in ("baseline", "scan"):
+        prefixes.append(f"{handle.project.data['compartment']}_{stage_name}_")
+    return prefixes
+
+
 def get_output_path(handle, stage_name, extension):
     """
     Builds the default output path for a stage, per PROJECT_SCHEMA_v2.md
-    Section 13.1: <compartment>_<stage>_<sequence>.<extension>, with the
+    Section 13.1: <compartment>_<kind>_<stage>_<sequence>.<extension>
+    (update 27: <kind> is baseline or scan; a diff pipeline has no <kind>
+    and keeps <compartment>_<stage>_<sequence>.<extension>), with the
     sequence a 3-digit number counting existing files in THIS pipeline's
     own stage subfolder only (scanned directly from disk, not from an
     internal counter - Section 13.1 defines the sequence in terms of
@@ -818,14 +1040,14 @@ def get_output_path(handle, stage_name, extension):
     folder.mkdir(parents=True, exist_ok=True)
 
     extension = extension if extension.startswith(".") else f".{extension}"
-    compartment = handle.project.data["compartment"]
-    prefix = f"{compartment}_{stage_name}_"
+    prefix = stage_name_prefix(handle, stage_name)
 
     existing_numbers = []
-    for f in folder.glob(f"{prefix}*{extension}"):
-        stem = f.name[len(prefix):-len(extension)]
-        if stem.isdigit():
-            existing_numbers.append(int(stem))
+    for each_prefix in _stage_name_prefixes(handle, stage_name):
+        for f in folder.glob(f"{each_prefix}*{extension}"):
+            stem = f.name[len(each_prefix):-len(extension)]
+            if stem.isdigit():
+                existing_numbers.append(int(stem))
 
     next_seq = (max(existing_numbers) + 1) if existing_numbers else 1
     filename = f"{prefix}{next_seq:03d}{extension}"
@@ -895,8 +1117,7 @@ def _scan_stage_folder(handle, stage_name, include_envelope_filtered=False):
     if not folder.is_dir():
         return []
 
-    compartment = handle.project.data["compartment"]
-    prefix = f"{compartment}_{stage_name}_"
+    prefixes = _stage_name_prefixes(handle, stage_name)     # update 27: new and old name
     current_output = handle.entry["stages"].get(stage_name, {}).get("output")
     rel_folder = _pipeline_folder_rel(handle.kind, handle.pipeline_id)
 
@@ -915,7 +1136,8 @@ def _scan_stage_folder(handle, stage_name, include_envelope_filtered=False):
         # separately offered (Browse... still reaches them by hand).
         results = []
         for sub in sorted(folder.iterdir()):
-            if not sub.is_dir() or not sub.name.startswith(prefix):
+            prefix = next((x for x in prefixes if sub.name.startswith(x)), None)
+            if not sub.is_dir() or prefix is None:
                 continue
             stem_after_prefix = sub.name[len(prefix):]
             if not stem_after_prefix.isdigit():
@@ -950,6 +1172,12 @@ def _scan_stage_folder(handle, stage_name, include_envelope_filtered=False):
     for f in sorted(folder.iterdir()):
         if not f.is_file():
             continue
+        # Update 23: a stage folder also holds text files that are not
+        # outputs (for example the M3C2 params file that Stage 5 saves as
+        # <compartment>_diff_<number>.txt). They are not offered.
+        if f.suffix.lower() in _NOT_AN_OUTPUT_SUFFIXES:
+            continue
+        prefix = next((x for x in prefixes if f.name.startswith(x)), prefixes[0])
         stem_after_prefix = f.stem[len(prefix):] if f.name.startswith(prefix) else ""
         rel_path = f"{rel_folder}/{folder_name}/{f.name}"
         if stem_after_prefix.isdigit():
@@ -980,6 +1208,11 @@ def _scan_stage_folder(handle, stage_name, include_envelope_filtered=False):
 # output. Their names are the output name plus a time stamp or "M3C2". They are
 # not outputs, so the picker does not offer them.
 _CLOUDCOMPARE_EXTRA = re.compile(r"(M3C2|\d{4}[-_]\d{2}[-_]\d{2})", re.IGNORECASE)
+
+
+# Files of a stage folder that are never an output of the stage: the params
+# file, logs, and other text files.
+_NOT_AN_OUTPUT_SUFFIXES = frozenset({".txt", ".json", ".log", ".yaml", ".yml", ".csv", ".md"})
 
 
 def _is_hand_named_ply(path, prefix):
@@ -1128,6 +1361,40 @@ def list_side_candidates(project, pipeline_ref):
                 "pipeline_kind": handle.kind,
                 "pipeline_id": handle.pipeline_id,
                 "stage_name": stage_name,
+                "files": files,
+            })
+    return groups
+
+
+def list_align_candidates(handle):
+    """
+    Update 27. Lists the Cleanup outputs that Stage 3 can use as its
+    'Align to' file (the cloud that ICP aligns this cloud onto): the
+    baseline first, then every scan, in the order of project.json. Each
+    pipeline gives one group (stage_name "cleanup"), newest file first, as
+    list_side_candidates() does. A pipeline with no Cleanup file on disk
+    gives no group. The pipeline of `handle` is not listed: aligning a
+    cloud onto an earlier output of itself is of no use.
+
+    Returns a list of group dicts, same shape as list_eligible_inputs().
+    The list is empty when nothing else has a Cleanup output yet.
+    """
+    project = handle.project
+    refs = ["baseline"] + list(project.data.get("scans", {}).keys())
+    groups = []
+    for ref in refs:
+        if ref == "baseline":
+            other = project.baseline_handle()
+        else:
+            other = project.scan_handle(ref)
+        if other.kind == handle.kind and other.pipeline_id == handle.pipeline_id:
+            continue
+        files = _scan_stage_folder(other, "cleanup")
+        if files:
+            groups.append({
+                "pipeline_kind": other.kind,
+                "pipeline_id": other.pipeline_id,
+                "stage_name": "cleanup",
                 "files": files,
             })
     return groups
