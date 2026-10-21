@@ -1,4 +1,4 @@
-# Shell launchers must remain executable as shell scripts after Windows checkout.
+* text=auto
 *.sh text eol=lf
-# Preserve exact upstream bytes recorded in PIPELINE_MANIFEST.json.
-QT-Processing-PipelineV2/** -text
+*.bat text eol=crlf
+*.blend -text

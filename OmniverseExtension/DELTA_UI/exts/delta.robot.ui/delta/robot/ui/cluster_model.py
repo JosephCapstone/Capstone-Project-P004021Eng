@@ -1,4 +1,5 @@
 """USD cluster discovery and temporary scene visibility, without Kit imports."""
+
 from dataclasses import dataclass
 import math
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
@@ -26,29 +27,53 @@ def read_clusters(stage):
         if not attr or not attr.HasAuthoredValueOpinion():
             continue
         centroid = prim.GetAttribute("delta:centroid").Get()
-        if centroid is None or len(centroid) != 3 or not all(math.isfinite(v) for v in centroid):
+        if (
+            centroid is None
+            or len(centroid) != 3
+            or not all(math.isfinite(v) for v in centroid)
+        ):
             continue
-        # Exported centroids are in the parent's coordinates. Site translation
-        # already equals the centroid, so applying the site transform doubles it.
         parent = prim.GetParent()
-        matrix = (UsdGeom.Xformable(parent).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                  if parent.IsA(UsdGeom.Xformable) else Gf.Matrix4d(1))
+        matrix = (
+            UsdGeom.Xformable(parent).ComputeLocalToWorldTransform(
+                Usd.TimeCode.Default()
+            )
+            if parent.IsA(UsdGeom.Xformable)
+            else Gf.Matrix4d(1)
+        )
         world = matrix.Transform(Gf.Vec3d(*centroid))
         raw_extent = prim.GetAttribute("delta:extent").Get() or (0, 0, 0)
         # World-axis aligned dimensions, including parent scale/rotation.
-        extent = tuple(sum(abs(matrix[j][i]) * abs(raw_extent[j]) for j in range(3)) for i in range(3))
-        shapes = tuple(str(child.GetPath()) for child in Usd.PrimRange(prim)
-                       if child != prim and (child.IsA(UsdGeom.Points) or child.IsA(UsdGeom.Mesh)))
-        clusters.append(DamageCluster(str(prim.GetPath()), int(attr.Get()), tuple(world), extent,
-                                      int(prim.GetAttribute("delta:pointCount").Get() or 0),
-                                      prim.GetAttribute("delta:meanMagnitude").Get(),
-                                      prim.GetAttribute("delta:maxMagnitude").Get(),
-                                      str(prim.GetAttribute("delta:surface").Get() or ""), shapes))
+        extent = tuple(
+            sum(abs(matrix[j][i]) * abs(raw_extent[j]) for j in range(3))
+            for i in range(3)
+        )
+        shapes = tuple(
+            str(child.GetPath())
+            for child in Usd.PrimRange(prim)
+            if child != prim and (child.IsA(UsdGeom.Points) or child.IsA(UsdGeom.Mesh))
+        )
+        clusters.append(
+            DamageCluster(
+                str(prim.GetPath()),
+                int(attr.Get()),
+                tuple(world),
+                extent,
+                int(prim.GetAttribute("delta:pointCount").Get() or 0),
+                prim.GetAttribute("delta:meanMagnitude").Get(),
+                prim.GetAttribute("delta:maxMagnitude").Get(),
+                str(prim.GetAttribute("delta:surface").Get() or ""),
+                shapes,
+            )
+        )
     return sorted(clusters, key=lambda c: (c.cluster_id, c.path))
 
 
 def scene_layers(stage):
-    layers = {key: [] for key in ("Baseline", "Inspection", "Damage points", "Damage mesh", "Bounds")}
+    layers = {
+        key: []
+        for key in ("Baseline", "Inspection", "Damage points", "Damage mesh", "Bounds")
+    }
     if stage is None:
         return layers
     for prim in stage.Traverse():
@@ -63,7 +88,10 @@ def scene_layers(stage):
                 key = "Baseline"
             elif "inspection" in name or "comparison" in name:
                 key = "Inspection"
-            elif any(token in path.lower() for token in ("damage", "change", "flagged", "shape")):
+            elif any(
+                token in path.lower()
+                for token in ("damage", "change", "flagged", "shape")
+            ):
                 key = "Damage mesh" if prim.IsA(UsdGeom.Mesh) else "Damage points"
             else:
                 continue
@@ -73,6 +101,7 @@ def scene_layers(stage):
 
 class SceneVisibility:
     """Author only in the session layer; restore previous session opinions."""
+
     def __init__(self, stage):
         self.stage = stage
         self.original = {}
@@ -85,8 +114,10 @@ class SceneVisibility:
         layer = self.stage.GetSessionLayer()
         if path not in self.original:
             spec = layer.GetAttributeAtPath(attr.GetPath())
-            self.original[path] = (spec is not None and spec.HasInfo("default"),
-                                   spec.GetInfo("default") if spec and spec.HasInfo("default") else None)
+            self.original[path] = (
+                spec is not None and spec.HasInfo("default"),
+                spec.GetInfo("default") if spec and spec.HasInfo("default") else None,
+            )
         with Usd.EditContext(self.stage, layer):
             attr.Set(UsdGeom.Tokens.inherited if visible else UsdGeom.Tokens.invisible)
 
@@ -108,6 +139,7 @@ class SceneVisibility:
 
 class InspectionSession:
     """Keep temporary inspection and renderer edits out of source layers."""
+
     def __init__(self, stage):
         self.stage = stage
         self.root = stage.GetRootLayer()
@@ -135,71 +167,133 @@ class InspectionSession:
 
 class ClusterHighlight:
     """Fade site boxes while retaining the pipeline's exported category colours."""
-    def __init__(self,stage):
-        self.stage=stage
-        self.original={}
-        self.previous=None
-        self.styles={"All":((1.0,.38,.06),.18), "Selected":((1.0,.38,.06),.38), "Other":((1.0,.38,.06),.012)}
-        self.materials={}
-        with Usd.EditContext(stage,stage.GetSessionLayer()):
-            for name,(color,opacity) in self.styles.items():
-                path="/World/__DELTA_InspectionStyles/"+name
-                material=UsdShade.Material.Define(stage,path)
-                reader=UsdShade.Shader.Define(stage,path+"/BoxColor")
-                reader.CreateIdAttr("UsdPrimvarReader_float3")
-                reader.CreateInput("varname",Sdf.ValueTypeNames.String).Set("displayColor")
-                reader.CreateInput("fallback",Sdf.ValueTypeNames.Float3).Set(Gf.Vec3f(*color))
-                reader.CreateOutput("result",Sdf.ValueTypeNames.Float3)
-                shader=UsdShade.Shader.Define(stage,path+"/Surface")
-                shader.CreateIdAttr("UsdPreviewSurface")
-                shader.CreateInput("diffuseColor",Sdf.ValueTypeNames.Color3f).ConnectToSource(reader.ConnectableAPI(),"result")
-                shader.CreateInput("opacity",Sdf.ValueTypeNames.Float).Set(opacity)
-                shader.CreateInput("roughness",Sdf.ValueTypeNames.Float).Set(.8)
-                material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(),"surface")
-                self.materials[name]=material
 
-    def apply(self,clusters,selected,show_outline=True):
-        if not self.stage:return
-        layer=self.stage.GetSessionLayer()
-        with Usd.EditContext(self.stage,layer):
+    def __init__(self, stage):
+        self.stage = stage
+        self.original = {}
+        self.previous = None
+        self.styles = {
+            "All": ((1.0, 0.38, 0.06), 0.18),
+            "Selected": ((1.0, 0.38, 0.06), 0.38),
+            "Other": ((1.0, 0.38, 0.06), 0.012),
+        }
+        self.materials = {}
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            for name, (color, opacity) in self.styles.items():
+                path = "/World/__DELTA_InspectionStyles/" + name
+                material = UsdShade.Material.Define(stage, path)
+                reader = UsdShade.Shader.Define(stage, path + "/BoxColor")
+                reader.CreateIdAttr("UsdPrimvarReader_float3")
+                reader.CreateInput("varname", Sdf.ValueTypeNames.String).Set(
+                    "displayColor"
+                )
+                reader.CreateInput("fallback", Sdf.ValueTypeNames.Float3).Set(
+                    Gf.Vec3f(*color)
+                )
+                reader.CreateOutput("result", Sdf.ValueTypeNames.Float3)
+                shader = UsdShade.Shader.Define(stage, path + "/Surface")
+                shader.CreateIdAttr("UsdPreviewSurface")
+                shader.CreateInput(
+                    "diffuseColor", Sdf.ValueTypeNames.Color3f
+                ).ConnectToSource(reader.ConnectableAPI(), "result")
+                shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(opacity)
+                shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.8)
+                material.CreateSurfaceOutput().ConnectToSource(
+                    shader.ConnectableAPI(), "surface"
+                )
+                self.materials[name] = material
+
+    def apply(self, clusters, selected, show_outline=True):
+        if not self.stage:
+            return
+        layer = self.stage.GetSessionLayer()
+        with Usd.EditContext(self.stage, layer):
             for c in clusters:
-                prim=self.stage.GetPrimAtPath(c.path+"/Bounds")
-                if not prim:continue
-                path=str(prim.GetPath())
-                style="All" if selected is None else "Selected" if c.path==selected else "Other"
-                previous_style="All" if self.previous is None else "Selected" if c.path==self.previous else "Other"
-                if path in self.original and style==previous_style:
+                prim = self.stage.GetPrimAtPath(c.path + "/Bounds")
+                if not prim:
+                    continue
+                path = str(prim.GetPath())
+                style = (
+                    "All"
+                    if selected is None
+                    else "Selected" if c.path == selected else "Other"
+                )
+                previous_style = (
+                    "All"
+                    if self.previous is None
+                    else "Selected" if c.path == self.previous else "Other"
+                )
+                if path in self.original and style == previous_style:
                     continue
                 if path not in self.original:
-                    saved={}
-                    for name in ("primvars:displayColor","primvars:displayOpacity","primvars:displayOpacity:indices","primvars:displayColor:indices"):
-                        attr=prim.GetAttribute(name);spec=layer.GetAttributeAtPath(attr.GetPath()) if attr else None
-                        saved[name]=(bool(spec and spec.HasInfo("default")),spec.GetInfo("default") if spec and spec.HasInfo("default") else None)
-                    rel=layer.GetRelationshipAtPath(prim.GetPath().AppendProperty("material:binding"))
-                    saved["binding"]=(bool(rel),list(prim.GetRelationship("material:binding").GetTargets()) if rel else [])
-                    self.original[path]=saved
-                color,opacity=self.styles[style]
-                geometry=UsdGeom.Gprim(prim)
-                opacity_primvar=geometry.CreateDisplayOpacityPrimvar(UsdGeom.Tokens.constant)
+                    saved = {}
+                    for name in (
+                        "primvars:displayColor",
+                        "primvars:displayOpacity",
+                        "primvars:displayOpacity:indices",
+                        "primvars:displayColor:indices",
+                    ):
+                        attr = prim.GetAttribute(name)
+                        spec = (
+                            layer.GetAttributeAtPath(attr.GetPath()) if attr else None
+                        )
+                        saved[name] = (
+                            bool(spec and spec.HasInfo("default")),
+                            (
+                                spec.GetInfo("default")
+                                if spec and spec.HasInfo("default")
+                                else None
+                            ),
+                        )
+                    rel = layer.GetRelationshipAtPath(
+                        prim.GetPath().AppendProperty("material:binding")
+                    )
+                    saved["binding"] = (
+                        bool(rel),
+                        (
+                            list(prim.GetRelationship("material:binding").GetTargets())
+                            if rel
+                            else []
+                        ),
+                    )
+                    self.original[path] = saved
+                color, opacity = self.styles[style]
+                geometry = UsdGeom.Gprim(prim)
+                opacity_primvar = geometry.CreateDisplayOpacityPrimvar(
+                    UsdGeom.Tokens.constant
+                )
                 opacity_primvar.Set(Vt.FloatArray([opacity]))
                 if opacity_primvar.IsIndexed():
                     opacity_primvar.BlockIndices()
                 UsdShade.MaterialBindingAPI.Apply(prim).Bind(self.materials[style])
-        self.previous=selected
+        self.previous = selected
 
     def restore(self):
-        if not self.stage:self.original.clear();return
-        with Usd.EditContext(self.stage,self.stage.GetSessionLayer()):
-            for path,saved in self.original.items():
-                prim=self.stage.GetPrimAtPath(path)
-                if not prim:continue
-                for name in ("primvars:displayColor","primvars:displayOpacity","primvars:displayOpacity:indices","primvars:displayColor:indices"):
-                    authored,value=saved[name];attr=prim.GetAttribute(name)
-                    if authored:attr.Set(value)
-                    else:attr.Clear()
-                authored,targets=saved["binding"]
-                rel=prim.GetRelationship("material:binding")
-                if authored:rel.SetTargets(targets)
-                elif rel:rel.ClearTargets(True)
+        if not self.stage:
+            self.original.clear()
+            return
+        with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
+            for path, saved in self.original.items():
+                prim = self.stage.GetPrimAtPath(path)
+                if not prim:
+                    continue
+                for name in (
+                    "primvars:displayColor",
+                    "primvars:displayOpacity",
+                    "primvars:displayOpacity:indices",
+                    "primvars:displayColor:indices",
+                ):
+                    authored, value = saved[name]
+                    attr = prim.GetAttribute(name)
+                    if authored:
+                        attr.Set(value)
+                    else:
+                        attr.Clear()
+                authored, targets = saved["binding"]
+                rel = prim.GetRelationship("material:binding")
+                if authored:
+                    rel.SetTargets(targets)
+                elif rel:
+                    rel.ClearTargets(True)
             self.stage.RemovePrim("/World/__DELTA_InspectionStyles")
         self.original.clear()

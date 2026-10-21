@@ -1,0 +1,12 @@
+# Python 3.12. Direct dependencies pinned to the tested processing environment.
+PySide6==6.12.0
+numpy==2.5.4
+open3d==0.20.0
+plyfile==1.1.5
+scipy==1.18.1
+ouster-sdk==1.0.1
+rosbags==0.9.23
+PyYAML==6.0.3
+kiss-icp==1.2.3
+scikit-learn==1.9.1
+usd-core==26.8

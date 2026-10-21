@@ -1,16 +1,20 @@
 """Session-only mesh clipping and point display filtering; source layers stay intact."""
+
 import math
 import numpy as np
 from pxr import Sdf, Usd, UsdGeom, UsdLux
-
 
 PREFIX = "omni:rtx:scene:sectionPlane:"
 
 
 def scene_bounds(stage):
     """World-space geometry bounds, independent of layer visibility and cameras."""
-    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
-                             useExtentsHint=True, ignoreVisibility=True)
+    cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(),
+        [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+        useExtentsHint=True,
+        ignoreVisibility=True,
+    )
     ranges = []
     for prim in stage.Traverse():
         if "__DELTA_" not in str(prim.GetPath()) and prim.IsA(UsdGeom.Boundable):
@@ -35,7 +39,7 @@ class SectionPlane:
         self._session_layer = stage.GetSessionLayer()
         self.bounds = scene_bounds(stage)
         self.axis = 1 if UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y else 2
-        self.fraction = .5
+        self.fraction = 0.5
         self.flipped = False
         self.enabled = False
         self._originals = {}
@@ -45,15 +49,17 @@ class SectionPlane:
         self._fill_path = None
 
     def _ensure_light(self):
-        if self._fill_path or any(UsdLux.LightAPI(prim) for prim in self.stage.Traverse()):
+        if self._fill_path or any(
+            UsdLux.LightAPI(prim) for prim in self.stage.Traverse()
+        ):
             return
         path = "/__DELTA_SliceFill"
         while self.stage.GetPrimAtPath(path):
             path += "_"
         self._fill_path = Sdf.Path(path)
         light = UsdLux.DomeLight.Define(self.stage, path)
-        light.CreateIntensityAttr(500.)
-        light.CreateColorAttr((1., 1., 1.))
+        light.CreateIntensityAttr(500.0)
+        light.CreateColorAttr((1.0, 1.0, 1.0))
 
     @property
     def position(self):
@@ -73,7 +79,11 @@ class SectionPlane:
         if self.bounds:
             low, high = self.bounds
             span = high[self.axis] - low[self.axis]
-            self.fraction = max(0., min(1., (point[self.axis] - low[self.axis]) / span)) if span > 1e-9 else .5
+            self.fraction = (
+                max(0.0, min(1.0, (point[self.axis] - low[self.axis]) / span))
+                if span > 1e-9
+                else 0.5
+            )
 
     def _remember(self, prim, name):
         path = prim.GetPath().AppendProperty(name)
@@ -102,14 +112,19 @@ class SectionPlane:
                 if source is None or not len(source):
                     continue
                 xyz = np.asarray(source)
-                matrix = np.asarray(points.ComputeLocalToWorldTransform(Usd.TimeCode.Default()))
+                matrix = np.asarray(
+                    points.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                )
                 arrays = [("points", source, 1)]
                 for name in ("widths", "normals", "ids", "velocities", "accelerations"):
                     value = prim.GetAttribute(name).Get()
                     if value is not None and len(value) == len(xyz):
                         arrays.append((name, value, 1))
                 for pv in UsdGeom.PrimvarsAPI(prim).GetPrimvars():
-                    if pv.GetInterpolation() not in (UsdGeom.Tokens.vertex, UsdGeom.Tokens.varying):
+                    if pv.GetInterpolation() not in (
+                        UsdGeom.Tokens.vertex,
+                        UsdGeom.Tokens.varying,
+                    ):
                         continue
                     attr = pv.GetIndicesAttr() if pv.IsIndexed() else pv.GetAttr()
                     if not attr.GetTypeName().isArray:
@@ -121,7 +136,9 @@ class SectionPlane:
                 self._point_clouds.append((prim, xyz, matrix, arrays, {}))
         for prim, xyz, matrix, arrays, coordinates in self._point_clouds:
             if self.axis not in coordinates:
-                coordinates[self.axis] = (xyz @ matrix[:3, self.axis] + matrix[3, self.axis]).astype(np.float32)
+                coordinates[self.axis] = (
+                    xyz @ matrix[:3, self.axis] + matrix[3, self.axis]
+                ).astype(np.float32)
             values = coordinates[self.axis]
             keep = values >= self.position if self.flipped else values <= self.position
             for name, value, size in arrays:
@@ -129,20 +146,35 @@ class SectionPlane:
                 if size == 1:
                     filtered = data[keep]
                 else:
-                    filtered = data.reshape((len(xyz), size) + data.shape[1:])[keep].reshape((-1,) + data.shape[1:])
+                    filtered = data.reshape((len(xyz), size) + data.shape[1:])[
+                        keep
+                    ].reshape((-1,) + data.shape[1:])
                 value_type = type(value)
-                result = value_type.FromNumpy(np.ascontiguousarray(filtered)) if hasattr(value_type, "FromNumpy") else value_type(filtered.tolist())
+                result = (
+                    value_type.FromNumpy(np.ascontiguousarray(filtered))
+                    if hasattr(value_type, "FromNumpy")
+                    else value_type(filtered.tolist())
+                )
                 self._remember(prim, name)
                 prim.GetAttribute(name).Set(result)
 
     def apply(self, render_product_path):
-        prim = self.stage.GetPrimAtPath(render_product_path) if render_product_path else None
+        prim = (
+            self.stage.GetPrimAtPath(render_product_path)
+            if render_product_path
+            else None
+        )
         if not prim:
             return False
         with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
             self._write(prim, "plane", self.equation, Sdf.ValueTypeNames.FloatArray)
             self._write(prim, "sectionLight", False, Sdf.ValueTypeNames.Bool)
-            self._write(prim, "enabled", bool(self.enabled and self.bounds), Sdf.ValueTypeNames.Bool)
+            self._write(
+                prim,
+                "enabled",
+                bool(self.enabled and self.bounds),
+                Sdf.ValueTypeNames.Bool,
+            )
             if self.enabled and self.bounds:
                 self._clip_points()
                 self._ensure_light()

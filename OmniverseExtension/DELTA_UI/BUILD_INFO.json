@@ -1,7 +1,0 @@
-{
-  "version": "08",
-  "created": "2026-10-21",
-  "source": "DELTA version 07 local viewer",
-  "feature": "Selected damage quick-info card; detailed Configuration retained",
-  "processing_environment": "Own .venv or DELTA_PIPELINE_PYTHON; bundled original pipeline source"
-}

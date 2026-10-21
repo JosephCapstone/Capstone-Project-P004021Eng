@@ -1,9 +1,9 @@
 .venv/
-logs/
 __pycache__/
-*.pyc
-
-# Generated runtime validation artifacts
+*.py[cod]
+logs/
+*.log
 /tests/*.png
 /tests/*_result.json
 /tests/*_fixture.usda
+/pipeline/Gui/baseline_registry.json

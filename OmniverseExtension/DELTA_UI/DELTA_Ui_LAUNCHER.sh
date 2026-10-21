@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ISAAC_SIM_ROOT="${ISAAC_SIM_ROOT:-$SCRIPT_DIR/../isaac-sim-standalone-6.1.0-linux-x86_64}"
+# CHANGE THIS LOCATION to your Isaac Sim installation, or set ISAAC_SIM_ROOT.
+ISAAC_SIM_ROOT="${ISAAC_SIM_ROOT:-$HOME/isaacsim}"
 KIT_EXECUTABLE="$ISAAC_SIM_ROOT/kit/kit"
 
 if [[ ! -x "$KIT_EXECUTABLE" ]]; then

@@ -1,4 +1,5 @@
 """Exercise temporary naming with real Kit UI and two small synthetic sites."""
+
 import asyncio
 import gc
 import json
@@ -21,17 +22,28 @@ async def smoke():
         for _ in range(10):
             await app.next_update_async()
         import delta.robot.ui.extension as module
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
-            ext = next(x for x in gc.get_objects() if isinstance(x, module.Extension) and getattr(x, "_window", None))
+            ext = next(
+                x
+                for x in gc.get_objects()
+                if isinstance(x, module.Extension) and getattr(x, "_window", None)
+            )
         stage = context.get_stage()
         for index in range(2):
             path = f"/World/Scan/DamageSites/Site_{index:02d}"
             prim = UsdGeom.Xform.Define(stage, path).GetPrim()
             prim.CreateAttribute("delta:clusterId", Sdf.ValueTypeNames.Int).Set(index)
-            prim.CreateAttribute("delta:centroid", Sdf.ValueTypeNames.Double3).Set(Gf.Vec3d(index * 3, 0, 0))
-            prim.CreateAttribute("delta:extent", Sdf.ValueTypeNames.Float3).Set(Gf.Vec3f(1, 2, .1))
-            prim.CreateAttribute("delta:meanChangeInward", Sdf.ValueTypeNames.Float).Set(-.012)
+            prim.CreateAttribute("delta:centroid", Sdf.ValueTypeNames.Double3).Set(
+                Gf.Vec3d(index * 3, 0, 0)
+            )
+            prim.CreateAttribute("delta:extent", Sdf.ValueTypeNames.Float3).Set(
+                Gf.Vec3f(1, 2, 0.1)
+            )
+            prim.CreateAttribute(
+                "delta:meanChangeInward", Sdf.ValueTypeNames.Float
+            ).Set(-0.012)
             UsdGeom.Cube.Define(stage, path + "/Bounds")
         fixture = Path(__file__).parent / "names_fixture.usda"
         stage.GetRootLayer().Export(str(fixture))
@@ -45,6 +57,7 @@ async def smoke():
             await app.next_update_async()
         original = stage.GetRootLayer().ExportToString()
         from delta.robot.ui.damage_summary import site_summary
+
         summary = site_summary(stage, ext._clusters[0].path)
         assert summary["severity"] == "Not assessed"
         assert "removed" in summary["baseline"]
@@ -60,14 +73,17 @@ async def smoke():
         ext._box_callout._ensure_overlay()
         for _ in range(5):
             await app.next_update_async()
-        ext._camera.move_to(stage, (0,0,0), 8, duration=.01)
+        ext._camera.move_to(stage, (0, 0, 0), 8, duration=0.01)
         for _ in range(10):
             await app.next_update_async()
         assert ext._box_callout._card is not None
         assert ext._box_callout._card.visible, "Selected damage card should be visible"
         from omni.kit.renderer import capture as renderer_capture
+
         capture = renderer_capture.acquire_renderer_capture_interface()
-        capture.capture_next_frame_swapchain(str(Path(__file__).parent / "quick_info_preview.png"))
+        capture.capture_next_frame_swapchain(
+            str(Path(__file__).parent / "quick_info_preview.png")
+        )
         for _ in range(5):
             await app.next_update_async()
         ext._box_callout._details_fn()
@@ -91,18 +107,35 @@ async def smoke():
         current = stage.GetRootLayer().ExportToString()
         if current != original:
             import difflib
-            raise AssertionError("Source changed:\n" + "\n".join(difflib.unified_diff(original.splitlines(), current.splitlines())))
+
+            raise AssertionError(
+                "Source changed:\n"
+                + "\n".join(
+                    difflib.unified_diff(original.splitlines(), current.splitlines())
+                )
+            )
         print("NAMES_TEST: checking scene change", flush=True)
         await context.new_stage_async()
         for _ in range(10):
             await app.next_update_async()
         assert ext._site_names == {}
         assert not ext._box_callout._card.visible
-        result = {"ok": True, "quick_info_visible": True, "details_navigation": True, "scene_close_hides_card": True, "temporary_site_names": True, "navigation_and_refresh": True,
-                  "reset": True, "new_scene_clears_names": True, "root_layer_unchanged": True}
+        result = {
+            "ok": True,
+            "quick_info_visible": True,
+            "details_navigation": True,
+            "scene_close_hides_card": True,
+            "temporary_site_names": True,
+            "navigation_and_refresh": True,
+            "reset": True,
+            "new_scene_clears_names": True,
+            "root_layer_unchanged": True,
+        }
     except Exception:
         result["error"] = traceback.format_exc()
-    (Path(__file__).parent / "kit_quick_info_smoke_result.json").write_text(json.dumps(result, indent=2))
+    (Path(__file__).parent / "kit_quick_info_smoke_result.json").write_text(
+        json.dumps(result, indent=2)
+    )
     print("DELTA_NAMES_RESULT", result, flush=True)
     app.post_quit(0 if result["ok"] else 1)
 

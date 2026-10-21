@@ -1,4 +1,5 @@
 """Exercise temporary naming with real Kit UI and two small synthetic sites."""
+
 import asyncio
 import gc
 import json
@@ -21,15 +22,22 @@ async def smoke():
         for _ in range(10):
             await app.next_update_async()
         import delta.robot.ui.extension as module
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
-            ext = next(x for x in gc.get_objects() if isinstance(x, module.Extension) and getattr(x, "_window", None))
+            ext = next(
+                x
+                for x in gc.get_objects()
+                if isinstance(x, module.Extension) and getattr(x, "_window", None)
+            )
         stage = context.get_stage()
         for index in range(2):
             path = f"/World/Scan/DamageSites/Site_{index:02d}"
             prim = UsdGeom.Xform.Define(stage, path).GetPrim()
             prim.CreateAttribute("delta:clusterId", Sdf.ValueTypeNames.Int).Set(index)
-            prim.CreateAttribute("delta:centroid", Sdf.ValueTypeNames.Double3).Set(Gf.Vec3d(index * 3, 0, 0))
+            prim.CreateAttribute("delta:centroid", Sdf.ValueTypeNames.Double3).Set(
+                Gf.Vec3d(index * 3, 0, 0)
+            )
             UsdGeom.Cube.Define(stage, path + "/Bounds")
         fixture = Path(__file__).parent / "names_fixture.usda"
         stage.GetRootLayer().Export(str(fixture))
@@ -66,17 +74,31 @@ async def smoke():
         current = stage.GetRootLayer().ExportToString()
         if current != original:
             import difflib
-            raise AssertionError("Source changed:\n" + "\n".join(difflib.unified_diff(original.splitlines(), current.splitlines())))
+
+            raise AssertionError(
+                "Source changed:\n"
+                + "\n".join(
+                    difflib.unified_diff(original.splitlines(), current.splitlines())
+                )
+            )
         print("NAMES_TEST: checking scene change", flush=True)
         await context.new_stage_async()
         for _ in range(10):
             await app.next_update_async()
         assert ext._site_names == {}
-        result = {"ok": True, "temporary_site_names": True, "navigation_and_refresh": True,
-                  "reset": True, "new_scene_clears_names": True, "root_layer_unchanged": True}
+        result = {
+            "ok": True,
+            "temporary_site_names": True,
+            "navigation_and_refresh": True,
+            "reset": True,
+            "new_scene_clears_names": True,
+            "root_layer_unchanged": True,
+        }
     except Exception:
         result["error"] = traceback.format_exc()
-    (Path(__file__).parent / "kit_names_smoke_result.json").write_text(json.dumps(result, indent=2))
+    (Path(__file__).parent / "kit_names_smoke_result.json").write_text(
+        json.dumps(result, indent=2)
+    )
     print("DELTA_NAMES_RESULT", result, flush=True)
     app.post_quit(0 if result["ok"] else 1)
 

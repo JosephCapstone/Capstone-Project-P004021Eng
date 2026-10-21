@@ -3,7 +3,9 @@ import unittest
 from pathlib import Path
 from pxr import Gf, Sdf, Usd, UsdGeom
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "exts/delta.robot.ui/delta/robot/ui"))
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1] / "exts/delta.robot.ui/delta/robot/ui")
+)
 from section_plane import PREFIX, SectionPlane
 
 
@@ -20,23 +22,29 @@ class SectionPlaneTests(unittest.TestCase):
     def test_plane_uses_world_bounds_and_flip_keeps_same_position(self):
         stage, _ = self.fixture()
         slicer = SectionPlane(stage)
-        self.assertEqual(slicer.bounds, ((9., 19., 29.), (11., 21., 31.)))
-        self.assertEqual(slicer.equation, [0., 0., -1., 30.])
+        self.assertEqual(slicer.bounds, ((9.0, 19.0, 29.0), (11.0, 21.0, 31.0)))
+        self.assertEqual(slicer.equation, [0.0, 0.0, -1.0, 30.0])
         slicer.flipped = True
-        self.assertEqual(slicer.equation, [0., 0., 1., -30.])
+        self.assertEqual(slicer.equation, [0.0, 0.0, 1.0, -30.0])
         slicer.axis = 0
-        slicer.fraction = .25
-        self.assertEqual(slicer.equation, [1., 0., 0., -9.5])
+        slicer.fraction = 0.25
+        self.assertEqual(slicer.equation, [1.0, 0.0, 0.0, -9.5])
 
     def test_source_and_geometry_unchanged_and_session_opinions_restored(self):
         stage, product = self.fixture()
         name = PREFIX + "plane"
-        product.CreateAttribute(name, Sdf.ValueTypeNames.FloatArray).Set([1., 0., 0., 4.])
+        product.CreateAttribute(name, Sdf.ValueTypeNames.FloatArray).Set(
+            [1.0, 0.0, 0.0, 4.0]
+        )
         with Usd.EditContext(stage, stage.GetSessionLayer()):
-            product.GetAttribute(name).Set([0., 1., 0., 5.])
+            product.GetAttribute(name).Set([0.0, 1.0, 0.0, 5.0])
             product.GetAttribute(name).SetCustomDataByKey("test", "preserve")
         source = stage.GetRootLayer().ExportToString()
-        before = stage.GetSessionLayer().GetAttributeAtPath(product.GetPath().AppendProperty(name)).GetInfo("customData")
+        before = (
+            stage.GetSessionLayer()
+            .GetAttributeAtPath(product.GetPath().AppendProperty(name))
+            .GetInfo("customData")
+        )
         slicer = SectionPlane(stage)
         slicer.enabled = True
         self.assertTrue(slicer.apply(product.GetPath()))
@@ -44,9 +52,13 @@ class SectionPlaneTests(unittest.TestCase):
         self.assertTrue(stage.GetPrimAtPath("/__DELTA_SliceFill"))
         slicer.restore()
         self.assertFalse(stage.GetPrimAtPath("/__DELTA_SliceFill"))
-        self.assertEqual(list(product.GetAttribute(name).Get()), [0., 1., 0., 5.])
+        self.assertEqual(list(product.GetAttribute(name).Get()), [0.0, 1.0, 0.0, 5.0])
         self.assertEqual(product.GetAttribute(name).GetCustomData(), before)
-        self.assertIsNone(stage.GetSessionLayer().GetPropertyAtPath(product.GetPath().AppendProperty(PREFIX + "enabled")))
+        self.assertIsNone(
+            stage.GetSessionLayer().GetPropertyAtPath(
+                product.GetPath().AppendProperty(PREFIX + "enabled")
+            )
+        )
         self.assertEqual(stage.GetRootLayer().ExportToString(), source)
         slicer.restore()
 
@@ -56,10 +68,10 @@ class SectionPlaneTests(unittest.TestCase):
         slicer.through((10, 20, 30.5))
         self.assertAlmostEqual(slicer.position, 30.5)
         slicer.through((10, 20, 100))
-        self.assertEqual(slicer.fraction, 1.)
+        self.assertEqual(slicer.fraction, 1.0)
         slicer.bounds = ((0, 0, 0), (1, 1, 0))
         slicer.through((0, 0, 0))
-        self.assertEqual(slicer.fraction, .5)
+        self.assertEqual(slicer.fraction, 0.5)
 
     def test_empty_scene_does_not_enable_and_missing_viewport_is_safe(self):
         stage = Usd.Stage.CreateInMemory()
@@ -75,13 +87,17 @@ class SectionPlaneTests(unittest.TestCase):
         stage, product = self.fixture()
         points = UsdGeom.Points.Define(stage, "/World/Scan/Points")
         points.CreatePointsAttr([(-1, 0, 0), (1, 0, 0)])
-        points.CreateWidthsAttr([.1, .2])
+        points.CreateWidthsAttr([0.1, 0.2])
         points.CreateIdsAttr([100, 200])
-        color = UsdGeom.PrimvarsAPI(points).CreatePrimvar("displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.vertex)
+        color = UsdGeom.PrimvarsAPI(points).CreatePrimvar(
+            "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.vertex
+        )
         color.Set([(1, 0, 0), (0, 1, 0)])
         color.SetIndices([1, 0])
-        weight = UsdGeom.PrimvarsAPI(points).CreatePrimvar("weight", Sdf.ValueTypeNames.FloatArray, UsdGeom.Tokens.vertex)
-        weight.Set([.3, .7])
+        weight = UsdGeom.PrimvarsAPI(points).CreatePrimvar(
+            "weight", Sdf.ValueTypeNames.FloatArray, UsdGeom.Tokens.vertex
+        )
+        weight.Set([0.3, 0.7])
         source = stage.GetRootLayer().ExportToString()
         slicer = SectionPlane(stage)
         slicer.axis = 0
@@ -91,7 +107,7 @@ class SectionPlaneTests(unittest.TestCase):
         self.assertEqual(list(points.GetIdsAttr().Get()), [100])
         self.assertEqual(list(color.GetIndices()), [1])
         self.assertEqual(len(color.Get()), 2)
-        self.assertAlmostEqual(weight.Get()[0], .3)
+        self.assertAlmostEqual(weight.Get()[0], 0.3)
         slicer.flipped = True
         slicer.apply(product.GetPath())
         self.assertEqual(list(points.GetIdsAttr().Get()), [200])
