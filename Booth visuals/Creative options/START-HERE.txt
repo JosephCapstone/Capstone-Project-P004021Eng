@@ -1,0 +1,7 @@
+A: one slide, dark visual overview
+B: one slide, light editorial comparison
+C: two slides, before/after and site detail
+D: three slides, Explore / Reveal / Inspect
+
+All PNG slides are 1920 x 1080.
+Mix headings, colours, imagery and layouts across options.

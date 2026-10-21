@@ -11,3 +11,7 @@ Open that folder and double-click **DELTA_Ui_LAUNCHER.bat**.
 
 This branch contains the UI, processing source and required Blender recipe.
 Python environments, scan data, generated outputs and old local snapshots are excluded.
+
+## Booth visuals
+
+The latest presentation images and previous design variants are in [Booth visuals](Booth%20visuals/README.md).
