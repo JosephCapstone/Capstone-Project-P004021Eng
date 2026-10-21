@@ -1,20 +1,13 @@
-# Capstone-Project-P004021Eng
+# DELTA UI
 
-GitHub repository for DELTA. (Explain what it does ...)
+Isaac Sim inspection UI with an eight-stage processing pipeline and Blender surface reconstruction.
 
+The current release is **[09-current-pipeline](Delta%20UI/09-current-pipeline/README.md)**.
+Open that folder and double-click **DELTA_Ui_LAUNCHER.bat**.
 
-## Joseph mapping UI
+- **USD Builder** opens the bundled processing pipeline.
+- **SETUP_PROCESSING.bat** installs its Python dependencies once.
+- **OPEN_PROCESSING_PIPELINE.bat** opens processing directly.
 
-The mapping-enabled UI is kept separate from the original DeltaUI:
-
-- `QBot_Platform/DeltaUI` is the unchanged original application.
-- `QBot_Platform/DeltaUI_Joseph` adds QBot/recording state checks, live 2D
-  mapping, map preview, save/cancel controls, and the WSL mapping worker.
-
-Start with [LAB_QUICK_START.md](LAB_QUICK_START.md). The full Windows, WSL,
-Jetson, Foxglove, and troubleshooting procedure is in
-[docs/live_mapping_lab_guide.md](docs/live_mapping_lab_guide.md), while the
-backend and state model are documented in
-[docs/delta_ui_mapping.md](docs/delta_ui_mapping.md).
-
-The existing Jetson `run_qbot.sh` and recording workflow remain unchanged.
+This branch contains the UI, processing source and required Blender recipe.
+Python environments, scan data, generated outputs and old local snapshots are excluded.
