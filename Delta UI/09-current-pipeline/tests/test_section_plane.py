@@ -73,6 +73,19 @@ class SectionPlaneTests(unittest.TestCase):
         slicer.through((0, 0, 0))
         self.assertEqual(slicer.fraction, 0.5)
 
+    def test_viewport_render_mode_overrides_global_minimal_and_restores(self):
+        stage, product = self.fixture()
+        name = "omni:rtx:rendermode"
+        product.CreateAttribute(name, Sdf.ValueTypeNames.Token).Set("Minimal")
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            product.GetAttribute(name).Set("PathTracing")
+        slicer = SectionPlane(stage)
+        slicer.enabled = True
+        slicer.apply(product.GetPath())
+        self.assertEqual(product.GetAttribute(name).Get(), "RaytracedLighting")
+        slicer.restore()
+        self.assertEqual(product.GetAttribute(name).Get(), "PathTracing")
+
     def test_empty_scene_does_not_enable_and_missing_viewport_is_safe(self):
         stage = Usd.Stage.CreateInMemory()
         product = stage.DefinePrim("/Render/Product", "RenderProduct")

@@ -36,8 +36,19 @@ def fixture():
             }[(side, kind)]
             path = f"/World/{side}{kind}"
             if kind == "Mesh":
-                obj = UsdGeom.Cube.Define(stage, path)
-                obj.CreateSizeAttr(1.5)
+                obj = UsdGeom.Mesh.Define(stage, path)
+                obj.CreatePointsAttr([
+                    (-.75, -.75, -.75), (.75, -.75, -.75),
+                    (.75, .75, -.75), (-.75, .75, -.75),
+                    (-.75, -.75, .75), (.75, -.75, .75),
+                    (.75, .75, .75), (-.75, .75, .75),
+                ])
+                obj.CreateFaceVertexCountsAttr([4] * 6)
+                obj.CreateFaceVertexIndicesAttr([
+                    0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4,
+                    1, 2, 6, 5, 2, 3, 7, 6, 3, 0, 4, 7,
+                ])
+                obj.CreateSubdivisionSchemeAttr("none")
                 obj.AddTranslateOp().Set(Gf.Vec3d(x, 0, z))
             else:
                 obj = UsdGeom.Points.Define(stage, path)

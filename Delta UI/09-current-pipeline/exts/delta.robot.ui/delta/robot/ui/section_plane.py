@@ -167,6 +167,12 @@ class SectionPlane:
         if not prim:
             return False
         with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
+            # Render-product settings override Carb globals in Kit 109. Merely
+            # changing /rtx/rendermode leaves a Minimal viewport unclipped.
+            self._remember(prim, "omni:rtx:rendermode")
+            prim.CreateAttribute("omni:rtx:rendermode", Sdf.ValueTypeNames.Token).Set(
+                "RaytracedLighting"
+            )
             self._write(prim, "plane", self.equation, Sdf.ValueTypeNames.FloatArray)
             self._write(prim, "sectionLight", False, Sdf.ValueTypeNames.Bool)
             self._write(
