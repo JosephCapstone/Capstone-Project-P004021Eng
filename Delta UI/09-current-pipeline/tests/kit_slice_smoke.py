@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import json
+import os
 import traceback
 import warnings
 from pathlib import Path
@@ -73,7 +74,8 @@ def fixture():
             material.CreateSurfaceOutput().ConnectToSource(
                 shader.ConnectableAPI(), "surface"
             )
-            UsdShade.MaterialBindingAPI.Apply(obj.GetPrim()).Bind(material)
+            if os.environ.get("DELTA_SLICE_UNBOUND") != "1":
+                UsdShade.MaterialBindingAPI.Apply(obj.GetPrim()).Bind(material)
     camera = UsdGeom.Camera.Define(stage, "/World/TestCamera")
     matrix = Gf.Matrix4d(1.0)
     matrix.SetLookAt(Gf.Vec3d(0, -16, 4), Gf.Vec3d(0, 0, 0), Gf.Vec3d(0, 0, 1))

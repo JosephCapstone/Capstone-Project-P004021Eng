@@ -37,3 +37,8 @@ Validated locally: 22 regression tests, processing startup and Isaac Sim damage-
 ## Linux
 
 Set `ISAAC_SIM_ROOT` and run `bash DELTA_Ui_LAUNCHER.sh`. Create `.venv` using Python 3.12 and install `pipeline/requirements.txt`.
+
+Slicing also hides mesh faces beyond the cut, including unbound scan surfaces.
+Mesh cut edges follow the authored faces; crossing faces are omitted. Large
+meshes can pause briefly on the first cut or an axis change. Reset restores
+the original mesh holes.

@@ -47,6 +47,7 @@ class SectionPlane:
         self._bound_product = None
         self._point_clouds = None
         self._fill_path = None
+        self._meshes = None
 
     def _ensure_light(self):
         if self._fill_path or any(
@@ -158,6 +159,47 @@ class SectionPlane:
                 self._remember(prim, name)
                 prim.GetAttribute(name).Set(result)
 
+    def _clip_meshes(self):
+        # The unbound display-colour mesh path can ignore RTX planes. Cull
+        # faces in USD as well, so scan surfaces cannot obscure the cutaway.
+        # Only session holeIndices change; topology, colours and source remain.
+        if self._meshes is None:
+            self._meshes = []
+            for prim in self.stage.Traverse():
+                if not prim.IsA(UsdGeom.Mesh) or "__DELTA_" in str(prim.GetPath()):
+                    continue
+                mesh = UsdGeom.Mesh(prim)
+                source = mesh.GetPointsAttr().Get()
+                counts = mesh.GetFaceVertexCountsAttr().Get()
+                indices = mesh.GetFaceVertexIndicesAttr().Get()
+                if source is None or counts is None or indices is None or not len(indices):
+                    continue
+                counts = np.asarray(counts)
+                if np.any(counts <= 0) or counts.sum() != len(indices):
+                    continue
+                self._meshes.append((
+                    mesh, np.asarray(source), np.asarray(indices),
+                    np.r_[0, np.cumsum(counts[:-1], dtype=np.int64)],
+                    np.asarray(mesh.ComputeLocalToWorldTransform(Usd.TimeCode.Default())),
+                    np.asarray(mesh.GetHoleIndicesAttr().Get(), dtype=np.int32), {},
+                ))
+        for mesh, xyz, indices, starts, matrix, holes, coordinates in self._meshes:
+            if self.axis not in coordinates:
+                world = xyz @ matrix[:3, self.axis] + matrix[3, self.axis]
+                vertex_values = world[indices]
+                coordinates[self.axis] = (
+                    np.minimum.reduceat(vertex_values, starts),
+                    np.maximum.reduceat(vertex_values, starts),
+                )
+            low, high = coordinates[self.axis]
+            # Exclude crossing faces too: the retained surface ends at the
+            # triangle boundary on the kept side, never beyond the cut plane.
+            removed = np.flatnonzero(low < self.position if self.flipped else high > self.position)
+            removed = np.union1d(removed, holes).astype(np.int32)
+            self._remember(mesh.GetPrim(), "holeIndices")
+            from pxr import Vt
+            mesh.CreateHoleIndicesAttr(Vt.IntArray.FromNumpy(removed))
+
     def apply(self, render_product_path):
         prim = (
             self.stage.GetPrimAtPath(render_product_path)
@@ -182,6 +224,7 @@ class SectionPlane:
                 Sdf.ValueTypeNames.Bool,
             )
             if self.enabled and self.bounds:
+                self._clip_meshes()
                 self._clip_points()
                 self._ensure_light()
         self._bound_product = str(render_product_path)

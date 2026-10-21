@@ -96,6 +96,29 @@ class SectionPlaneTests(unittest.TestCase):
         slicer.apply(product.GetPath())
         self.assertFalse(product.GetAttribute(PREFIX + "enabled").Get())
 
+    def test_mesh_faces_clip_in_world_space_and_restore_existing_holes(self):
+        stage, product = self.fixture()
+        mesh = UsdGeom.Mesh.Define(stage, '/World/Scan/Surface')
+        mesh.CreatePointsAttr([(-1,0,0),(-1,1,0),(-1,0,1),
+                              (1,0,0),(1,1,0),(1,0,1)])
+        mesh.CreateFaceVertexCountsAttr([3,3,3])
+        mesh.CreateFaceVertexIndicesAttr([0,1,2,3,4,5,0,3,2])
+        mesh.CreateHoleIndicesAttr([0])
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            mesh.GetHoleIndicesAttr().Set([2])
+        source = stage.GetRootLayer().ExportToString()
+        slicer = SectionPlane(stage)
+        slicer.axis = 0
+        slicer.enabled = True
+        slicer.apply(product.GetPath())
+        self.assertEqual(list(mesh.GetHoleIndicesAttr().Get()), [1,2])
+        slicer.flipped = True
+        slicer.apply(product.GetPath())
+        self.assertEqual(list(mesh.GetHoleIndicesAttr().Get()), [0,2])
+        slicer.restore()
+        self.assertEqual(list(mesh.GetHoleIndicesAttr().Get()), [2])
+        self.assertEqual(stage.GetRootLayer().ExportToString(), source)
+
     def test_point_arrays_stay_aligned_with_transforms_and_indexed_colours(self):
         stage, product = self.fixture()
         points = UsdGeom.Points.Define(stage, "/World/Scan/Points")
