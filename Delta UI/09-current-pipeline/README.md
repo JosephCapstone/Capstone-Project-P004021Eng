@@ -1,44 +1,56 @@
-# DELTA UI — version 09
+# DELTA UI
 
-Isaac Sim viewer with selected-damage information, slicing, navigation and an eight-stage point-cloud processing pipeline.
+Isaac Sim viewer and eight-stage point-cloud processing pipeline.
 
-## Run
+Bundled pipeline updated on 21 October 2026 from the upstream
+`QT-Processing-PipelineV2` branch, commit `e024463667c4e093d1a7607dcb503eb06b368563`.
+The DELTA `pipeline/Gui/main.py` entry point forwards to the upstream Qt app;
+USD Builder and OPEN_PROCESSING_PIPELINE.bat use this bundled version.
 
-1. Install Isaac Sim 6.1. Set `ISAAC_SIM_ROOT` to its installation folder, or edit `ISAAC_SIM_LOCATION` in `DELTA_Ui_LAUNCHER.bat`. The standard standalone Downloads installation is detected automatically.
-2. Double-click **DELTA_Ui_LAUNCHER.bat**, then choose **Open USD**.
-3. For processing, install Python 3.12 and double-click **SETUP_PROCESSING.bat** once.
-4. Click **USD Builder**, or double-click **OPEN_PROCESSING_PIPELINE.bat**.
+## Launch on Windows
 
-Processing runs separately from Isaac Sim. `DELTA_PIPELINE_PYTHON` can select an existing compatible Python environment.
+1. Install Isaac Sim 6.1.
+2. Open `DELTA_Ui_LAUNCHER.bat` in a text editor. Change `ISAAC_SIM_LOCATION` near the top to the folder containing `kit\kit.exe`. The standard standalone Downloads folder is also detected automatically.
+3. Double-click `DELTA_Ui_LAUNCHER.bat` and choose **Open USD**.
 
-CloudCompare with M3C2 is required for Cleanup and Diff. Blender 5.2+ is required for Surface; the Geometry Nodes recipe is included. Set `DELTA_BLENDER` if Blender is not detected. See [the pipeline setup guide](pipeline/pc_setup_guide.md) for details.
+An `ISAAC_SIM_ROOT` environment variable overrides the configured location. The viewer can open existing USD scenes without installing the processing packages. Damage cards require a scene exported with damage-site metadata.
 
-## Contents
+## Set up processing once
 
-- `exts/`: inspection viewer.
-- `pipeline/`: processing source, sensor profiles and Blender recipe.
-- `tests/`: regression and Isaac Sim checks.
+Install Python 3.12 with the Python launcher, then double-click `SETUP_PROCESSING.bat`. It creates `.venv` beside the launcher and installs `pipeline/requirements.txt`.
 
-The pipeline comes from upstream `QT-Processing-PipelineV2` commit `e024463667c4e093d1a7607dcb503eb06b368563`, dated 21 October 2026. The viewer retains version 08's damage cards and inspection tools. Duplicate legacy interfaces and unused helper files have been removed.
+In DELTA, click **USD Builder**. `OPEN_PROCESSING_PIPELINE.bat` opens the same application directly. If using an existing compatible environment, set `DELTA_PIPELINE_PYTHON` to its Python executable.
 
-Damage measurements come from the exported USD metadata. Missing severity is shown as **Not assessed**. Inspection edits use the USD session layer.
+CloudCompare with the M3C2 plugin is required for Cleanup/Diff. Blender 5.2+ is required by the supplied surface recipe. Choose their executables in the pipeline when needed; `DELTA_BLENDER` can also specify Blender's location. Keep the entire `pipeline` folder together. Copy scan files and any referenced USD assets separately.
 
-## Developer checks
+## Inspection
 
-From this folder:
+Select a damage site for its ID, dimensions, severity and baseline displacement. **View details** opens the fuller Configuration panel. Missing severity is shown as **Not assessed**. Baseline values describe exported displacement, not an inferred percentage change.
 
-```powershell
-.venv/Scripts/python.exe -m unittest discover -s tests -v
-.venv/Scripts/python.exe tests/run_kit_smoke.py kit_quick_info_smoke.py
-```
+Site navigation, temporary names, camera views, isolation, layer controls and slicing are available in the viewer. Inspection changes remain in the USD session layer. Temporary names and slicing reset when the scene closes.
 
-Validated locally: 22 regression tests, processing startup and Isaac Sim damage-card integration passed. Full scan processing has not been rerun for this release.
+Slicing filters points and hides mesh faces beyond the cutting plane, including
+unbound scan meshes that bypass RTX section planes. Mesh cut edges follow the
+authored faces; crossing faces are omitted. Large meshes can take a few seconds
+for the first cut or an axis change. Reset restores the original mesh holes.
+
+## Folder contents
+
+- `exts/`: the viewer extension.
+- `pipeline/`: the processing app, shared helpers and required recipe assets.
+- `tests/`: developer checks; not needed for normal use.
+- `.venv/` and `logs/`: created locally by setup or processing.
 
 ## Linux
 
-Set `ISAAC_SIM_ROOT` and run `bash DELTA_Ui_LAUNCHER.sh`. Create `.venv` using Python 3.12 and install `pipeline/requirements.txt`.
+Set the installation path near the top of `DELTA_Ui_LAUNCHER.sh`, or export `ISAAC_SIM_ROOT`, and run `bash DELTA_Ui_LAUNCHER.sh`. For processing, create `.venv` with Python 3.12 and install `pipeline/requirements.txt` using that environment's pip.
 
-Slicing also hides mesh faces beyond the cut, including unbound scan surfaces.
-Mesh cut edges follow the authored faces; crossing faces are omitted. Large
-meshes can pause briefly on the first cut or an axis change. Reset restores
-the original mesh holes.
+## Developer checks
+
+From this folder, run `.venv/Scripts/python.exe -m unittest discover -s tests -v` and `.venv/Scripts/python.exe tests/check_project_workflow.py`. Optional Isaac Sim integration: `.venv/Scripts/python.exe tests/run_kit_smoke.py kit_quick_info_smoke.py`. Generated test results and images stay under `tests/` and are ignored by Git.
+
+## Local version layout
+
+This is version 09, relocated into Capstone/Delta UI on 21 October 2026.
+Scans/, Processed/ and Sample scenes/ hold the retained local data.
+Launchers resolve this version relative to their own folder.
