@@ -193,6 +193,38 @@ beams of one column are a few columns apart in azimuth, so the test in the colum
 direction compares points that are a little more apart than neighbours. This
 makes the test a little stricter at real edges. Check the result on your sensor:
 run once with and once without the option, and compare the maps.
+
+QBOT ODOMETRY, SAVED POSES (added 2026-10-24, update 30):
+A ROS2 bag from the QBot can hold the gyro (/qbot_imu) and the wheel speed
+(/qbot_speed_feedback). The helper scripts/qbot_odometry.py reads them. This script
+uses it in three ways. The first two do not change the map:
+  1. Check (on by default for a ROS2 bag with these topics; --no-odometry-check
+     switches it off). After the run, the script compares the SLAM path with the
+     gyro and the wheel speed. It prints the yaw change per frame, the distance, and
+     the direction of travel. A WARNING line means that the two do not agree. Nothing
+     is changed. For a bag without QBot topics, the output is the same as before.
+  2. --save-poses PATH writes the SLAM poses (the sensor pose of every frame) in TUM
+     format: time x y z qx qy qz qw. The time is the end of the sweep of the frame in
+     seconds when the source gives it (a ROS2 bag), else the frame number.
+     qbot_odometry.py --bag BAG --poses PATH repeats the check later.
+     --save-odometry PATH writes the odometry-only path (gyro and wheel speed, no SLAM)
+     in the same format, at the same frame times, and in the same frame. It needs the
+     QBot topics. Where the odometry covers the first frame, the first pose is the
+     identity, as in the poses file. Use frame_chain.py to put either file into the
+     frame of Stage 2 or Stage 3.
+  3. --odometry-prior qbot (default: off) gives the motion between two frames from the
+     gyro and the wheel speed to KISS-ICP as the starting guess. KISS-ICP also uses it
+     for the deskew speed of that frame. A frame that the odometry does not cover
+     (a gap in the data) runs as normal. The sensor must be in the middle of the robot
+     with z up, and --odometry-mount-yaw is the direction of the robot forward axis in
+     the x-y plane of the lidar (default -90: forward is lidar -y, measured on the two
+     real bags of 2026-10-20). The check prints the measured direction.
+Checked on two real windows (190 frames at 20 Hz, Hesai XT32 on a QBot): the SLAM yaw
+step differed from the gyro by 0.15 deg per frame, and the SLAM distance differed from
+the wheel speed by 0.0 and 1.6 percent. At 20 Hz the prior changed the path by at most
+1.5 cm and 1.4 deg. The prior helped only when frames were removed to make the turn per
+frame large (see CHANGES.md update 30). NOT checked: a full run, drift over minutes, the
+time that the read of the odometry needs on a bag of 4 GB, a different robot.
 """
 
 import argparse
@@ -281,12 +313,17 @@ class Ros2BagDataset:
         self.frames_without_time = 0
         self.points_kept = 0
         self.first_frame_time_span = None
+        self.bag_dir = Path(bag_dir)
         self._warned = set()
         self._start_iteration()
 
     def _start_iteration(self):
         self._messages = self._reader.messages(connections=[self.connection])
         self._next = 0
+        # Update 30: frame_times[i] is the time of the end of the sweep of frame i, in
+        # seconds: the time in the header of the message plus the time across the frame
+        # (0 when the frame has no usable point time).
+        self.frame_times = []
 
     def close(self):
         reader, self._reader = getattr(self, "_reader", None), None
@@ -312,7 +349,11 @@ class Ros2BagDataset:
         connection, _stamp, raw = next(self._messages)
         self._next += 1
         message = self._reader.deserialize(raw, connection.msgtype)
-        return self._read_cloud(message)
+        xyz, timestamps = self._read_cloud(message)
+        stamp = message.header.stamp
+        self.frame_times.append(int(stamp.sec) + int(stamp.nanosec) * 1e-9
+                                + (float(np.max(timestamps)) if len(timestamps) else 0.0))
+        return xyz, timestamps
 
     def _warn_once(self, key, text):
         if key not in self._warned:
@@ -393,6 +434,25 @@ class Ros2BagDataset:
         elif self.time_field:
             lines.append(f"  Deskew used the time field '{self.time_field}' for every frame.")
         return lines
+
+
+def import_qbot_odometry():
+    """The helper qbot_odometry.py (next to this script). Returns the module, or None
+    when it is not there. Update 30."""
+    try:
+        import qbot_odometry
+        return qbot_odometry
+    except ImportError:
+        pass
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+        try:
+            import qbot_odometry
+            return qbot_odometry
+        except ImportError:
+            sys.path.remove(here)
+    return None
 
 
 def guess_dataloader(source_path):
@@ -600,6 +660,35 @@ def main():
     parser.add_argument("--flying-pixel-rel", type=float, default=0.02,
                          help="Flying-pixel filter: the part of the limit that grows with the "
                               "range (a fraction of the range of the point). Default: 0.02")
+    parser.add_argument("--save-poses", default=None, metavar="PATH",
+                         help="Write the SLAM poses (sensor pose of every frame) to this file in "
+                              "TUM format: time x y z qx qy qz qw. The time is the end of the "
+                              "sweep in seconds for a ROS2 bag, else the frame number.")
+    parser.add_argument("--save-odometry", default=None, metavar="PATH",
+                         help="Write the odometry-only path (from the QBot gyro and wheel "
+                              "speed, no SLAM) to this file in TUM format, at the same frame "
+                              "times as --save-poses and in the same frame (the first frame "
+                              "that the odometry covers has the SLAM pose of that frame). "
+                              "Needs a ROS2 bag with the QBot topics. It is dead reckoning, so "
+                              "it drifts. It is independent of --odometry-prior.")
+    parser.add_argument("--odometry-prior", choices=("off", "qbot"), default="off",
+                         help="qbot: give the motion from the QBot gyro and wheel speed to "
+                              "KISS-ICP as the starting guess of each frame (needs the topics "
+                              "/qbot_imu and /qbot_speed_feedback in a ROS2 bag). It also sets "
+                              "the speed that KISS-ICP uses for deskew. Default: off")
+    parser.add_argument("--odometry-mount-yaw", type=float, default=-90.0,
+                         help="Direction of the robot forward axis in the x-y plane of the "
+                              "lidar, in degrees. Default: -90 (forward = lidar -y). The check "
+                              "after the run measures this value.")
+    parser.add_argument("--odometry-imu-topic", default=None,
+                         help="Name of the Imu topic with the gyro. Default: the topic of type "
+                              "Imu that has 'qbot' in its name.")
+    parser.add_argument("--odometry-speed-topic", default=None,
+                         help="Name of the TwistStamped topic with the wheel speed. Default: "
+                              "the topic of type TwistStamped that has 'qbot' in its name.")
+    parser.add_argument("--no-odometry-check", action="store_true",
+                         help="Do not read the QBot topics and do not compare them with the "
+                              "SLAM path (saves the time to read them).")
     args = parser.parse_args()
 
     if args.flying_pixel_filter and (args.flying_pixel_abs < 0 or args.flying_pixel_rel < 0
@@ -694,6 +783,49 @@ def main():
 
     odometry = KissICP(config=config)
 
+    # QBot odometry (update 30): find, check, and optionally use as a prior.
+    qbot_module = None
+    qbot_data = None
+    qbot_track = None
+    qbot_prior = None
+    if (args.save_poses or args.save_odometry or args.odometry_prior != "off"
+            or not args.no_odometry_check):
+        qbot_module = import_qbot_odometry()
+    if qbot_module is None and (args.save_poses or args.save_odometry
+                                or args.odometry_prior != "off"):
+        print("ERROR: qbot_odometry.py was not found next to this script. It is needed for "
+              "--save-poses, --save-odometry and --odometry-prior.")
+        return 1
+    if (qbot_module is not None and isinstance(dataset, Ros2BagDataset)
+            and (args.odometry_prior != "off" or args.save_odometry
+                 or not args.no_odometry_check)):
+        try:
+            qbot_data = qbot_module.read_odometry(
+                dataset.bag_dir, args.odometry_imu_topic, args.odometry_speed_topic)
+        except Exception as e:
+            print(f"  NOTE: the QBot odometry topics could not be read ({type(e).__name__}: {e}).")
+            qbot_data = None
+        if qbot_data is not None:
+            qbot_track = qbot_module.OdometryTrack(qbot_data, args.odometry_mount_yaw)
+            imu_rate, speed_rate = qbot_data.rates()
+            print(f"  QBot odometry found: gyro '{qbot_data.topics['imu']}' ({imu_rate:.0f} Hz), "
+                  f"speed '{qbot_data.topics['speed']}' ({speed_rate:.0f} Hz).")
+    if args.odometry_prior != "off":
+        if not isinstance(dataset, Ros2BagDataset):
+            print("WARNING: --odometry-prior needs a ROS2 bag folder that is read by this "
+                  "script. SLAM runs without the prior.")
+        elif qbot_track is None:
+            print("WARNING: --odometry-prior qbot was set, but the bag has no QBot gyro and "
+                  "speed topics (an Imu topic and a TwistStamped topic with 'qbot' in the "
+                  "name). SLAM runs without the prior.")
+        elif not hasattr(odometry, "last_delta"):
+            print("WARNING: this version of kiss-icp has no 'last_delta'. SLAM runs without "
+                  "the prior.")
+        else:
+            qbot_prior = qbot_module.OdometryPrior(qbot_track)
+            print(f"  Odometry prior ON: gyro yaw + wheel speed, mount yaw "
+                  f"{args.odometry_mount_yaw:+.0f} deg. It is also the speed for deskew.")
+
     global_map = None
     if use_global_map:
         from kiss_icp.mapping import VoxelHashMap
@@ -735,8 +867,12 @@ def main():
     if args.flying_pixel_filter:
         print(f"  Flying-pixel filter on: limit {args.flying_pixel_abs} m + "
               f"{args.flying_pixel_rel} x range.")
+    saved_poses = []
+    saved_times = []
+    previous_time = None
     for idx in range(n_frames):
         raw_frame, timestamps = dataset[idx]
+        frame_time = dataset.frame_times[idx] if isinstance(dataset, Ros2BagDataset) else None
         if args.flying_pixel_filter:
             flying = flying_pixel_mask(raw_frame, timestamps,
                                        args.flying_pixel_abs, args.flying_pixel_rel)
@@ -750,7 +886,14 @@ def main():
                     keep = ~flying
                     raw_frame = np.asarray(raw_frame)[keep]
                     timestamps = np.asarray(timestamps)[keep]
+        if qbot_prior is not None:
+            delta = qbot_prior.delta(previous_time, frame_time)
+            if delta is not None:
+                odometry.last_delta = delta
         frame, _source = odometry.register_frame(raw_frame, timestamps)
+        previous_time = frame_time
+        saved_poses.append(odometry.last_pose.copy())
+        saved_times.append(frame_time if frame_time is not None else float(idx))
         if global_map is not None:
             down = voxel_down_sample(frame, config.mapping.voxel_size * 0.5)
             pose = odometry.last_pose
@@ -774,6 +917,48 @@ def main():
     if isinstance(dataset, Ros2BagDataset):
         for line in dataset.summary_lines():
             print(line)
+
+    if qbot_prior is not None:
+        print(f"Odometry prior: used for {qbot_prior.used} frames, not available for "
+              f"{qbot_prior.missing} frames (no odometry data in the time range, or a gap).")
+    if args.save_poses:
+        try:
+            count = qbot_module.write_tum(args.save_poses, saved_times, saved_poses)
+        except OSError as e:
+            print(f"ERROR: could not write the poses file: {e}")
+            return 1
+        print(f"Saved {count} poses to: {args.save_poses}")
+    if args.save_odometry:
+        if not isinstance(dataset, Ros2BagDataset):
+            print("WARNING: --save-odometry needs a ROS2 bag folder that is read by this "
+                  "script. No odometry file is written.")
+        elif qbot_track is None:
+            print("WARNING: --save-odometry was set, but the bag has no QBot gyro and speed "
+                  "topics (an Imu topic and a TwistStamped topic with 'qbot' in the name). "
+                  "No odometry file is written.")
+        else:
+            indices, odometry_path = qbot_module.odometry_path_in_slam_frame(
+                qbot_track, saved_times, saved_poses)
+            if not indices:
+                print("WARNING: the odometry covers none of the frames. No odometry file "
+                      "is written.")
+            else:
+                try:
+                    count = qbot_module.write_tum(
+                        args.save_odometry, [saved_times[i] for i in indices], odometry_path)
+                except OSError as e:
+                    print(f"ERROR: could not write the odometry file: {e}")
+                    return 1
+                print(f"Saved {count} odometry poses to: {args.save_odometry}")
+                if count < len(saved_times):
+                    print(f"  NOTE: {len(saved_times) - count} of {len(saved_times)} frames have "
+                          f"no odometry pose (outside the time range of the odometry, or after "
+                          f"a gap in the data).")
+    if qbot_track is not None and not args.no_odometry_check:
+        if isinstance(dataset, Ros2BagDataset):
+            result = qbot_module.check_against_poses(qbot_track, saved_times, saved_poses)
+            for line in qbot_module.report_lines(qbot_data, qbot_track, result):
+                print(line)
 
     if args.flying_pixel_filter:
         if fp_filtered_frames:

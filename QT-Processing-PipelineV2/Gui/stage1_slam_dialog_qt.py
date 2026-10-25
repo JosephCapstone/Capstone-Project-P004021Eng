@@ -369,6 +369,72 @@ class Stage1SlamFieldsMixin:
                  "simulator, or with no time value is not filtered, and the run output "
                  "says so. To check the effect, make one map with the option and one "
                  "without it, and compare them in CloudCompare.")
+
+        # Update 30: the QBot odometry. Each field has a "?" button (update 29).
+        self.add_checkbox("kiss_icp_save_poses",
+                          "Save the poses (the path of the sensor) next to the map",
+                          default=False)
+        self.add_help(
+            "kiss_icp_save_poses",
+            "Writes the pose of each scan to a text file next to the map. The file has the "
+            "name of the map with '.poses.txt' at the end. The format is TUM: one line for "
+            "each scan, 'time x y z qx qy qz qw'. For a ROS2 bag, the time is the end of "
+            "the scan sweep in seconds. KISS-ICP only.",
+            effects=[
+                ("On", "Stage 1 writes the poses file. The map is the same."),
+                ("Off", "Stage 1 writes no poses file."),
+            ],
+            when="A later stage must know where the sensor was for each scan.")
+        self.add_checkbox("kiss_icp_save_odometry",
+                          "Save the QBot odometry path next to the map",
+                          default=False)
+        self.add_help(
+            "kiss_icp_save_odometry",
+            "Writes the path of the QBot alone to '<map name>.odometry.txt'. The path is "
+            "made from the gyro and the wheel speed, without the lidar. The file has the "
+            "same format as the poses file. It starts at the first SLAM pose. Thus it is "
+            "in the same frame as the SLAM poses.",
+            effects=[
+                ("On", "Stage 1 writes the odometry file."),
+                ("Off", "Stage 1 writes no odometry file."),
+            ],
+            when="You want to compare the lidar path with the QBot path, or a later stage "
+                 "must use the QBot path.",
+            note="The bag must be a ROS2 bag with the QBot topics. Without them, the run "
+                 "prints a warning and writes no file. KISS-ICP only.")
+        self.add_radio_choice("kiss_icp_odometry_prior", "QBot odometry prior:", [
+            ("Off - SLAM uses only the lidar (the default)", "off"),
+            ("On - the gyro and the wheel speed of the QBot give the start value of each "
+             "scan match", "qbot"),
+        ], default="off")
+        self.add_help(
+            "kiss_icp_odometry_prior",
+            "Gives KISS-ICP a start value for the movement between two scans. The start "
+            "value comes from the gyro and the wheel speed of the QBot.",
+            effects=[
+                ("Off", "SLAM uses only the lidar. The map is the same as before."),
+                ("On", "SLAM starts each scan match from the QBot movement. The result "
+                       "changes very little at 20 Hz."),
+            ],
+            when="The robot turns a large angle between two scans, for example at a low "
+                 "frame rate.",
+            note="The bag must have the QBot topics: an Imu topic and a TwistStamped speed "
+                 "topic with 'qbot' in the name. Without them, the run prints a warning and "
+                 "continues without the prior. With the QBot topics, the run always prints "
+                 "a check of the SLAM path against the QBot odometry.")
+        self.add_text_field("kiss_icp_odometry_mount_yaw",
+                            "Sensor mount yaw (degrees, optional):")
+        self.add_help(
+            "kiss_icp_odometry_mount_yaw",
+            "The angle from the forward direction of the robot to the x axis of the "
+            "sensor. The odometry prior and the odometry check use it.",
+            effects=[
+                ("Empty", "the value is -90. This is the value for the Hesai XT32 on the "
+                          "QBot (forward is the -y axis of the sensor)."),
+                ("A number", "Stage 1 uses this angle."),
+            ],
+            when="The sensor is turned on the robot. The check in the run output tells you "
+                 "if another value fits better.")
         self.end_advanced()
         self.end_section()
 
@@ -732,12 +798,35 @@ class Stage1SlamFieldsMixin:
             map_max_vertical = self._optional_positive_meters(
                 "kiss_icp_map_max_vertical", "Map max vertical distance")
             flying_pixel_filter = bool(self.fields["kiss_icp_flying_pixel_filter"].get())
+            # Update 30. The new arguments are given to the builder only when an option is
+            # on. A run with all options off makes the same call as before update 30.
+            save_poses = bool(self.fields["kiss_icp_save_poses"].get())
+            save_odometry = bool(self.fields["kiss_icp_save_odometry"].get())
+            odometry_prior = self.fields["kiss_icp_odometry_prior"].get() or "off"
+            mount_yaw_text = self.fields["kiss_icp_odometry_mount_yaw"].get().strip()
+            odometry_mount_yaw = None
+            if mount_yaw_text:
+                try:
+                    odometry_mount_yaw = float(mount_yaw_text)
+                except ValueError:
+                    raise ValueError(
+                        "Sensor mount yaw (degrees, optional) must be a number in degrees, "
+                        "for example -90, or blank.")
+            odometry_extra = {}
+            if save_poses:
+                odometry_extra["save_poses"] = True
+            if save_odometry:
+                odometry_extra["save_odometry"] = True
+            if odometry_prior != "off":
+                odometry_extra["odometry_prior"] = odometry_prior
+            if odometry_mount_yaw is not None:
+                odometry_extra["odometry_mount_yaw"] = odometry_mount_yaw
             cmd = core.build_kiss_icp_slam_command(
                 script, source, output, config=config, dataloader=dataloader,
                 topic=topic, meta=meta, voxel_size=kiss_voxel_size, min_range=kiss_min_range,
                 map_max_range=map_max_range, map_max_horizontal=map_max_horizontal,
                 map_max_vertical=map_max_vertical, pipeline=active_pipeline,
-                flying_pixel_filter=flying_pixel_filter)
+                flying_pixel_filter=flying_pixel_filter, **odometry_extra)
 
             effective_voxel_size = (kiss_voxel_size if kiss_voxel_size is not None
                                      else core.read_kiss_icp_voxel_size(config))
@@ -769,6 +858,14 @@ class Stage1SlamFieldsMixin:
                 + ("Flying-pixel filter: on (see the run output for the number of points "
                    "removed, and for the frames that could not be filtered)\n"
                    if flying_pixel_filter else "")
+                + (f"Poses file: {core.kiss_icp_poses_path(output)}\n" if save_poses else "")
+                + (f"Odometry file: {core.kiss_icp_odometry_path(output)}\n"
+                   if save_odometry else "")
+                + ("QBot odometry prior: on (the run output tells if the bag has the QBot "
+                   "topics, and how many scans used the prior)\n"
+                   if odometry_prior != "off" else "")
+                + (f"Sensor mount yaw for the odometry: {odometry_mount_yaw} degrees\n"
+                   if odometry_mount_yaw is not None else "")
                 + f"Saved to: {output}\n\n"
                 "=== NOTE ===\n"
                 "Check the tool output above for the actual point count - if it's in the "

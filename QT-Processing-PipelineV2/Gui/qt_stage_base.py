@@ -58,15 +58,16 @@ groups_fn lambdas, which do call pm.list_eligible_inputs()/
 list_side_candidates() - a stage file imports project_manager itself
 for that, the same way pipeline_applet.py's dialog functions do).
 """
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QObject, Signal, QRectF
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QCheckBox, QRadioButton, QButtonGroup, QComboBox, QWidget, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QTreeWidget, QTreeWidgetItem,
-    QGroupBox, QToolButton, QFrame,
+    QGroupBox, QToolButton, QFrame, QToolTip,
 )
 
 try:
@@ -599,7 +600,7 @@ HELP_POPUP_WIDTH = 420
 _HELP_BUTTON_STYLE = (
     "QToolButton { border: 1px solid #888888; border-radius: 10px; background: #f0f0f0;"
     " color: #000000; font-weight: bold; }"
-    "QToolButton:hover { background: #ffffdc; }")
+    "QToolButton[lit=\"true\"] { background: #ffffdc; }")
 _HELP_POPUP_STYLE = (
     "QFrame#helpPopup { background: #ffffdc; border: 1px solid #767676; }"
     "QLabel { background: transparent; color: #000000; font-size: 9pt; }")
@@ -620,8 +621,31 @@ def help_html(what, effects=None, when=None, note=None):
     return "<br>".join(parts)
 
 
+class _HelpPopup(QFrame):
+    """The yellow box. It tells its button when it hides (any way)."""
+
+    def __init__(self, parent, on_hidden):
+        super().__init__(parent, Qt.Popup)
+        self._on_hidden = on_hidden
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._on_hidden()
+
+
 class HelpButton(QToolButton):
-    """The "?" button. Click: show the popup under the button."""
+    """The "?" button. Click: show the popup under the button. Click again
+    (or click anywhere else): close it.
+
+    The yellow colour is a property that this class sets itself: it is on
+    while the pointer is over the button or while the popup is open, and it
+    is cleared when the popup closes. (A ':hover' style stays on after a
+    popup closes, because the popup has the mouse and the button never gets
+    the 'leave' event.)"""
+
+    # A press on the button within this time after the popup closed is the
+    # click that closed it. It must not open the popup again.
+    CLOSE_CLICK_SECONDS = 0.35
 
     def __init__(self, html, parent=None):
         super().__init__(parent)
@@ -633,11 +657,63 @@ class HelpButton(QToolButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
         self.popup = None
+        self._hidden_at = 0.0
+        self._skip_release = False
         self.clicked.connect(self.show_popup)
+
+    # -- the yellow colour --------------------------------------------------
+
+    def _set_lit(self, lit):
+        if self.property("lit") != ("true" if lit else "false"):
+            self.setProperty("lit", "true" if lit else "false")
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.update()
+
+    def _pointer_is_over(self):
+        return self.rect().contains(self.mapFromGlobal(QCursor.pos()))
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._set_lit(True)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if not (self.popup is not None and self.popup.isVisible()):
+            self._set_lit(False)
+
+    def _popup_hidden(self):
+        self._hidden_at = time.monotonic()
+        QToolTip.hideText()
+        self.setToolTip("Click for an explanation")
+        self.setDown(False)
+        self._set_lit(self._pointer_is_over())
+
+    # -- clicks -------------------------------------------------------------
+
+    def mousePressEvent(self, event):
+        QToolTip.hideText()
+        popup_open = self.popup is not None and self.popup.isVisible()
+        just_closed = (time.monotonic() - self._hidden_at) < self.CLOSE_CLICK_SECONDS
+        if popup_open or just_closed:
+            # This click closes the popup. It does not open it again.
+            if popup_open:
+                self.popup.hide()
+            self._skip_release = True
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._skip_release:
+            self._skip_release = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def show_popup(self):
         if self.popup is None:
-            popup = QFrame(self.window(), Qt.Popup)
+            popup = _HelpPopup(self.window(), self._popup_hidden)
             popup.setObjectName("helpPopup")
             popup.setStyleSheet(_HELP_POPUP_STYLE)
             layout = QVBoxLayout(popup)
@@ -660,6 +736,9 @@ class HelpButton(QToolButton):
             if y + self.popup.height() > area.bottom():
                 y = self.mapToGlobal(self.rect().topRight()).y() - self.popup.height() - 2
         self.popup.move(x, y)
+        QToolTip.hideText()
+        self.setToolTip("")          # no tooltip over the open popup
+        self._set_lit(True)
         self.popup.show()
 
 

@@ -791,11 +791,39 @@ def read_kiss_icp_max_range(config_path):
     return _read_kiss_icp_config_value(config_path, "data", "max_range")
 
 
+ODOMETRY_PRIOR_CHOICES = ("off", "qbot")
+
+
+def kiss_icp_poses_path(output_ply):
+    """
+    Update 30. The file that Stage 1 (KISS-ICP) writes the poses of the scans to when
+    save_poses is on: the name of the map with the extension '.poses.txt' (map_001.ply
+    gives map_001.poses.txt). The format is TUM: one line for each scan,
+    'time x y z qx qy qz qw'. The time is the end of the sweep in seconds for a ROS2 bag,
+    else the number of the scan. The poses are in the map frame of the saved map.
+    """
+    return Path(output_ply).with_suffix(".poses.txt")
+
+
+def kiss_icp_odometry_path(output_ply):
+    """
+    Update 30. The file that Stage 1 (KISS-ICP) writes the path of the QBot odometry to
+    when save_odometry is on: the name of the map with '.odometry.txt' (map_001.ply gives
+    map_001.odometry.txt). The format is the same as for the poses file (TUM). The path is
+    made from the gyro and the wheel speed only, and it starts at the first pose of the
+    SLAM path, so it is in the same frame as the SLAM poses. The script frame_chain.py
+    moves both files into the frame of a later stage.
+    """
+    return Path(output_ply).with_suffix(".odometry.txt")
+
+
 def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None,
                                  dataloader=None, topic=None, meta=None,
                                  voxel_size=None, min_range=None, map_max_range=None,
                                  map_max_horizontal=None, map_max_vertical=None,
-                                 pipeline=None, flying_pixel_filter=False):
+                                 pipeline=None, flying_pixel_filter=False,
+                                 save_poses=False, odometry_prior="off",
+                                 odometry_mount_yaw=None, save_odometry=False):
     """
     Delegates to slam_kiss_icp.py - a second, genuinely different SLAM
     backend from ouster-cli's own bundled kiss-icp (same underlying
@@ -897,12 +925,41 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
     Ouster pcap dataloader, an Ouster ROS bag). A frame without a usable layout
     is not filtered, and the script says so at the end of the run. Recorded in
     project mode as "flying_pixel_filter". Not tested with a real capture.
+
+    save_poses, odometry_prior, odometry_mount_yaw (update 30): the QBot odometry.
+    save_poses=True passes --save-poses <map name>.poses.txt (see kiss_icp_poses_path).
+    The script writes the pose of each scan to that file, in the TUM format.
+    odometry_prior is "off" (the default: SLAM uses only the lidar) or "qbot" (passes
+    --odometry-prior qbot). With "qbot" the script reads the gyro and the wheel speed of
+    the QBot from the bag, and uses them as the start value of each scan match. It
+    needs a ROS2 bag with the QBot topics. The script prints a warning and runs
+    without the prior when the bag has no such topics. odometry_mount_yaw is the
+    angle in degrees from the forward direction of the robot to the x axis of the
+    sensor, or None for the default of the script (-90). It is passed as
+    --odometry-mount-yaw whenever it is given. The script uses it for the prior and
+    for its check of the odometry. Recorded in project mode as "save_poses",
+    "poses_file", "odometry_prior" and "odometry_mount_yaw", and only when an option is
+    on, so that the record of a run without the options is the same as before update 30.
+
+    save_odometry (update 30): True passes --save-odometry <map name>.odometry.txt (see
+    kiss_icp_odometry_path). The script writes the path of the QBot odometry alone (gyro
+    and wheel speed, no lidar) to that file, in the frame of the SLAM map. It needs the
+    QBot topics; without them the script prints a warning and writes no file. Recorded in
+    project mode as "save_odometry" and "odometry_file" when on.
     """
+    if odometry_prior not in ODOMETRY_PRIOR_CHOICES:
+        raise ValueError(f"odometry_prior must be one of {ODOMETRY_PRIOR_CHOICES}, "
+                         f"not {odometry_prior!r}.")
+    if odometry_mount_yaw is not None:
+        try:
+            odometry_mount_yaw = float(odometry_mount_yaw)
+        except (TypeError, ValueError):
+            raise ValueError("odometry_mount_yaw must be a number in degrees, or None.")
     effective_voxel_size = voxel_size if voxel_size is not None else read_kiss_icp_voxel_size(config)
     effective_min_range = min_range if min_range is not None else read_kiss_icp_min_range(config)
 
     if pipeline is not None:
-        project_manager.start_stage(pipeline, "slam", params={
+        params = {
             "backend": "kiss_icp",
             "config": str(config) if config else None,
             "dataloader": dataloader,
@@ -919,7 +976,28 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
             "map_max_horizontal": map_max_horizontal,
             "map_max_vertical": map_max_vertical,
             "flying_pixel_filter": bool(flying_pixel_filter),
-        })
+        }
+        if save_poses:
+            params["save_poses"] = True
+            poses_file = kiss_icp_poses_path(output_ply)
+            try:
+                params["poses_file"] = project_manager.to_relative_path(
+                    pipeline.project, poses_file)
+            except Exception:
+                params["poses_file"] = str(poses_file)
+        if save_odometry:
+            params["save_odometry"] = True
+            odometry_file = kiss_icp_odometry_path(output_ply)
+            try:
+                params["odometry_file"] = project_manager.to_relative_path(
+                    pipeline.project, odometry_file)
+            except Exception:
+                params["odometry_file"] = str(odometry_file)
+        if odometry_prior != "off":
+            params["odometry_prior"] = odometry_prior
+        if odometry_mount_yaw is not None:
+            params["odometry_mount_yaw"] = odometry_mount_yaw
+        project_manager.start_stage(pipeline, "slam", params=params)
 
     cmd = [sys.executable, str(kiss_icp_script),
            "--input", str(source),
@@ -944,6 +1022,14 @@ def build_kiss_icp_slam_command(kiss_icp_script, source, output_ply, config=None
         cmd += ["--map-max-vertical", str(map_max_vertical)]
     if flying_pixel_filter:
         cmd.append("--flying-pixel-filter")
+    if save_poses:
+        cmd += ["--save-poses", str(kiss_icp_poses_path(output_ply))]
+    if save_odometry:
+        cmd += ["--save-odometry", str(kiss_icp_odometry_path(output_ply))]
+    if odometry_prior != "off":
+        cmd += ["--odometry-prior", str(odometry_prior)]
+    if odometry_mount_yaw is not None:
+        cmd += ["--odometry-mount-yaw", str(odometry_mount_yaw)]
     return cmd
 
 

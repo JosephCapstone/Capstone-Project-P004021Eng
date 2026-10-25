@@ -28,6 +28,15 @@ unusual scan), this falls back to the old count-weighted-by-horizontality
 score, with a clear warning that the fallback path was used - better to
 produce a best-effort answer with a visible warning than to fail outright.
 
+Update 30: a small horizontal fragment is not taken as the floor. RANSAC can find a
+small second plane of the same floor, 1 to 3 cm lower than the big one. The lowest-plane
+rule then took the small plane, and the tilt of the cloud was different on each run. Now a
+horizontal plane that has fewer points than --floor-min-share (default 0.3) times the
+points of the biggest horizontal plane cannot be the floor. Then the floor is the BIGGEST
+plane that is not more than --floor-band (default 0.30 m) higher than the lowest plane that
+is left. The report names each plane that is lower than the floor and was not taken.
+--floor-min-share 0 and --floor-band 0 give the rule of before update 30.
+
 Optional (Update 26): --remove-below-floor deletes the stray points that lie
 far below the floor (for example ghost returns under the deck). It is off by
 default. The script always counts these points in its report, also when the
@@ -118,7 +127,21 @@ def find_plane_candidates(pcd, max_planes=6, distance_threshold=0.02,
     return candidates
 
 
-def pick_floor_candidate(candidates, horizontal_threshold=0.7):
+def horizontal_fragments(candidates, horizontal_threshold=0.7, min_share=0.0):
+    """
+    Update 30. The horizontal candidates that are too small to be the floor: those with
+    fewer points than min_share times the points of the biggest horizontal candidate.
+    Returns [] when min_share is 0 or less. The biggest horizontal candidate is never in
+    the list.
+    """
+    horizontal = [c for c in candidates if abs(c["normal"][2]) >= horizontal_threshold]
+    if not horizontal or min_share <= 0:
+        return []
+    biggest = max(c["count"] for c in horizontal)
+    return [c for c in horizontal if c["count"] < min_share * biggest]
+
+
+def pick_floor_candidate(candidates, horizontal_threshold=0.7, min_share=0.0, band=0.0):
     """
     Among candidates that are actually near-horizontal (|normal.z| >=
     horizontal_threshold - this alone already rules out walls), picks the
@@ -134,12 +157,28 @@ def pick_floor_candidate(candidates, horizontal_threshold=0.7):
     scan) - better to produce a best-effort answer than fail outright,
     but the caller should treat this path as a strong warning sign.
 
+    Update 30 (both off by default, so a call without them gives the old result):
+    min_share: a horizontal candidate with fewer points than min_share times the points of
+    the biggest horizontal candidate is not eligible. It is a fragment of a bigger plane, not
+    the floor (see horizontal_fragments).
+    band (metres): the floor is the BIGGEST eligible candidate that is not more than `band`
+    higher than the lowest eligible candidate. A ceiling is far above the band. This gives
+    one stable plane when the floor is bent or has two layers a few cm apart.
+
     Returns (floor_candidate_or_None, used_fallback).
     """
     if not candidates:
         return None, False
 
     horizontal_candidates = [c for c in candidates if abs(c["normal"][2]) >= horizontal_threshold]
+    fragments = horizontal_fragments(candidates, horizontal_threshold, min_share)
+    horizontal_candidates = [c for c in horizontal_candidates
+                             if not any(c is f for f in fragments)]
+    if horizontal_candidates and band > 0:
+        lowest = min(c["centroid"][2] for c in horizontal_candidates)
+        horizontal_candidates = [c for c in horizontal_candidates
+                                 if c["centroid"][2] <= lowest + band]
+        return max(horizontal_candidates, key=lambda c: c["count"]), False
     if horizontal_candidates:
         floor = min(horizontal_candidates, key=lambda c: c["centroid"][2])
         return floor, False
@@ -325,6 +364,54 @@ def print_below_floor_report(result, margin, keep_area, removing):
         print("  Nothing would be removed with the current margin.")
 
 
+def level_transform_matrix(R, floor_centroid):
+    """
+    Update 30. The 4 x 4 matrix of the leveling: new_point = M @ old_point (column
+    vectors). It is the rotation R about the origin (0, 0, 0), then a shift along Z only
+    that puts the floor at Z=0. This is what level_point_cloud() does to the points.
+    """
+    M = np.eye(4)
+    M[:3, :3] = R
+    M[2, 3] = -float((R @ np.asarray(floor_centroid, dtype=np.float64))[2])
+    return M
+
+
+def transform_file_path(output_path):
+    """Update 30. <output name>_transform.json next to the leveled cloud."""
+    from pathlib import Path
+    out = Path(output_path)
+    return out.with_name(out.stem + "_transform.json")
+
+
+def write_transform_file(path, matrix, input_path, output_path, rotation_deg,
+                         n_points_in, n_points_out, floor_points):
+    """
+    Update 30. Writes the leveling matrix to a JSON file, so that later stages can move
+    data (for example the poses of the sensor) from the frame of the SLAM map into the
+    frame of the leveled cloud: new = matrix @ old. The numbers have all digits.
+    """
+    import datetime
+    import json
+    from pathlib import Path
+    record = {
+        "schema": 1,
+        "kind": "level_transform",
+        "convention": "new = matrix @ old (column vectors, 4 x 4, metres)",
+        "from_frame": "Stage 1 map (the input of this script)",
+        "to_frame": "Stage 2 leveled cloud (the output of this script)",
+        "matrix": [[float(v) for v in row] for row in np.asarray(matrix)],
+        "rotation_deg": float(rotation_deg),
+        "floor_points": int(floor_points),
+        "input": str(input_path),
+        "output": str(output_path),
+        "n_points_in": int(n_points_in),
+        "n_points_out": int(n_points_out),
+        "points_removed": int(n_points_in - n_points_out),
+        "created": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    Path(path).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -367,15 +454,38 @@ def main():
     parser.add_argument("--floor-cell", type=float, default=0.5,
                          help="Size of the square cells (metres) in which the local floor "
                               "is found. Default: 0.5")
+    parser.add_argument("--transform-file", default=None,
+                         help="Update 30. Where to write the 4 x 4 leveling matrix (JSON). "
+                              "Default: <output name>_transform.json next to the output. "
+                              "A later stage uses it to move data (for example the poses of "
+                              "the sensor) from the SLAM frame to the leveled frame.")
+    parser.add_argument("--no-transform-file", action="store_true",
+                         help="Update 30. Do not write the transform file.")
+    parser.add_argument("--floor-min-share", type=float, default=0.3,
+                         help="Update 30. A horizontal plane with fewer points than this "
+                              "share of the points of the biggest horizontal plane cannot be "
+                              "the floor (it is a fragment of a bigger plane). 0 gives the "
+                              "rule of before update 30 (the lowest horizontal plane). "
+                              "Default: 0.3")
+    parser.add_argument("--floor-band", type=float, default=0.30,
+                         help="Update 30. The floor is the BIGGEST plane that is not more than "
+                              "this many metres higher than the lowest horizontal plane (after "
+                              "--floor-min-share). A ceiling is far above the band. 0 takes "
+                              "the lowest plane, as before update 30. Default: 0.30")
     args = parser.parse_args()
     if args.below_floor_margin <= 0:
         parser.error("--below-floor-margin must be larger than 0.")
+    if not 0 <= args.floor_min_share <= 1:
+        parser.error("--floor-min-share must be between 0 and 1.")
+    if args.floor_band < 0:
+        parser.error("--floor-band must be 0 or more.")
     if args.below_floor_keep_area < 0 or args.below_floor_link <= 0 or args.floor_cell <= 0:
         parser.error("--below-floor-keep-area must be 0 or more; --below-floor-link and "
                      "--floor-cell must be larger than 0.")
 
     print(f"Loading: {args.input}")
     pcd = load_cloud(args.input)
+    n_points_in = len(pcd.points)
     print(f"  {len(pcd.points)} points loaded.")
 
     print("Searching for candidate planes (floor/walls/ceiling)...")
@@ -394,7 +504,23 @@ def main():
         print(f"  Candidate {i}: {c['count']} points, normal={np.round(c['normal'], 3)}, "
               f"horizontality={abs(c['normal'][2]):.3f}, Z={c['centroid'][2]:.3f} ({horizontal_note})")
 
-    floor, used_fallback = pick_floor_candidate(candidates, args.horizontal_threshold)
+    floor, used_fallback = pick_floor_candidate(candidates, args.horizontal_threshold,
+                                                args.floor_min_share, args.floor_band)
+    if not used_fallback:
+        small = horizontal_fragments(candidates, args.horizontal_threshold,
+                                     args.floor_min_share)
+        for plane in candidates:
+            if abs(plane["normal"][2]) < args.horizontal_threshold:
+                continue
+            if plane["centroid"][2] >= floor["centroid"][2] or plane is floor:
+                continue                  # not lower than the floor: the old rule did not take it
+            reason = (f"it has fewer than {args.floor_min_share * 100:.0f} % of the points of "
+                      f"the biggest horizontal plane" if any(plane is f for f in small)
+                      else f"the floor is the biggest plane within {args.floor_band:.2f} m of "
+                           f"the lowest plane")
+            print(f"  Not taken as the floor (update 30): a horizontal plane of "
+                  f"{plane['count']} points at Z={plane['centroid'][2]:.3f}. It is lower than "
+                  f"the floor, but {reason}.")
     if used_fallback:
         print(f"\nWARNING: no candidate cleared the horizontal threshold "
               f"({args.horizontal_threshold}) - falling back to the biggest-and-most-"
@@ -430,8 +556,21 @@ def main():
         pcd = pcd.select_by_index(np.flatnonzero(below["remove_mask"]), invert=True)
         print(f"  {n_before} points before, {len(pcd.points)} points after.")
 
+    n_points_out = len(pcd.points)
     o3d.io.write_point_cloud(str(args.output), pcd)
     print(f"Saved to: {args.output}")
+
+    # Update 30. The leveling matrix. A failure here never stops the run: the cloud is saved.
+    if not args.no_transform_file:
+        transform_path = args.transform_file or transform_file_path(args.output)
+        try:
+            write_transform_file(transform_path, level_transform_matrix(R, floor["centroid"]),
+                                 args.input, args.output, rotation_angle_deg,
+                                 n_points_in, n_points_out, floor["count"])
+            print(f"Saved the leveling matrix to: {transform_path}")
+        except OSError as error:
+            print(f"WARNING: the leveling matrix could not be saved ({error}). "
+                  f"The leveled cloud is saved.")
     return 0
 
 
