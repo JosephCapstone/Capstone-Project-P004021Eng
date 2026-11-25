@@ -61,7 +61,8 @@ class DeltaLidarTest(unittest.TestCase):
     def test_probe_measures_the_directory_written_by_each_recorder(self):
         for lidar, directory in (("hesai", "test_hesai_trial"), ("ouster", "test_trial")):
             with self.subTest(lidar=lidar), tempfile.TemporaryDirectory() as temporary:
-                bag = Path(temporary) / "ros2" / "bags" / directory
+                bag_root = "bags" if lidar == "hesai" else "ros2/bags"
+                bag = Path(temporary) / bag_root / directory
                 bag.mkdir(parents=True)
                 (bag / "data.db3").write_bytes(b"recorded data")
                 client = ParamikoJetsonClient(BackendConfig(lidar_type=lidar))
@@ -112,6 +113,41 @@ class DeltaLidarTest(unittest.TestCase):
         self.assertIn("ros2 topic echo /lidar_points", run.call_args.args[0])
         self.assertIn("ros2 topic echo /lidar_packets", run.call_args.args[0])
         self.assertIn("--no-daemon", run.call_args.args[0])
+        self.assertIn("source ~/hesai_ws/install/setup.bash", run.call_args.args[0])
+
+    def test_probe_recognises_manual_qbot_launch_without_delta_wrapper(self):
+        client = ParamikoJetsonClient(BackendConfig(lidar_type="hesai"))
+
+        def run_locally(command, timeout=8.0):
+            # Match only the command used in the user's first terminal.
+            setup = (
+                "pgrep() { [[ 'ros2 launch qbot_platform "
+                "qbot_platform_manual_drive_launch.py' =~ $2 ]]; }\n"
+            )
+            result = subprocess.run(
+                ["bash", "-c", setup + command], capture_output=True,
+                text=True, timeout=timeout,
+            )
+            return result.returncode, result.stdout, result.stderr
+
+        client.run = run_locally
+        self.assertEqual(client.probe(None)["qbot"], 1)
+
+    def test_driver_without_qbot_is_degraded_and_can_be_stopped(self):
+        jetson = Mock()
+        jetson.probe.return_value = {"qbot": 0, "hesai_driver": 1, "hesai_data": 1}
+        backend = DeltaBackend(
+            config=BackendConfig(lidar_type="hesai"),
+            jetson_client=jetson, start_monitor=False,
+        )
+        try:
+            backend._poll_jetson()
+            state = backend.get_state()["qbot"]
+            self.assertEqual(state["state"], "degraded")
+            self.assertTrue(state["process_running"])
+            self.assertTrue(state["recording_ready"])
+        finally:
+            backend.close()
 
     def test_hesai_reports_started_once_when_live_data_arrives(self):
         jetson = Mock()
@@ -192,7 +228,7 @@ class DeltaLidarTest(unittest.TestCase):
 
     def test_hesai_stop_cleans_up_orphans_that_ignore_graceful_signals(self):
         marker = "delta_stop_test_" + uuid.uuid4().hex
-        labels = [marker + suffix for suffix in ("_wrapper", "_launch", "_driver", "_ouster")]
+        labels = [marker + suffix for suffix in ("_wrapper", "_launch", "_driver", "_qbot", "_ouster")]
         program = (
             "import signal,time; "
             "signal.signal(signal.SIGINT,signal.SIG_IGN); "
@@ -217,15 +253,16 @@ class DeltaLidarTest(unittest.TestCase):
                 patch.object(BackendConfig, "jetson_run_pattern", new_callable=PropertyMock, return_value=patterns[0]),
                 patch("delta_backend.HESAI_LAUNCH_PATTERN", patterns[1]),
                 patch("delta_backend.HESAI_DRIVER_PATTERN", patterns[2]),
+                patch("delta_backend.QBOT_LAUNCH_PATTERN", patterns[3]),
             ):
                 backend.stop_script()
                 backend._executor.shutdown(wait=True)
             command = jetson.run.call_args.args[0]
             result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for process in processes[:3]:
+            for process in processes[:4]:
                 self.assertEqual(process.wait(timeout=2), -signal.SIGKILL)
-            self.assertIsNone(processes[3].poll(), "Unrelated Ouster process must remain running")
+            self.assertIsNone(processes[4].poll(), "Unrelated Ouster process must remain running")
         finally:
             backend.close()
             for process in processes:

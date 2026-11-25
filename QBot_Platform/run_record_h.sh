@@ -1,18 +1,27 @@
 #!/bin/bash
+# Installed on the QBot as /home/nvidia/run_record_h.sh.
+set -e
 
-# This file is located on the QBot in /home/nvidia/
+BAG_NUM=${1:-}
+if [[ ! "$BAG_NUM" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]]; then
+  echo "Usage: $0 RECORDING_NAME (1-32 letters, numbers, underscores or hyphens)" >&2
+  exit 1
+fi
 
-# This script runs the following commands:
-# 1. Initialises the Ros2 workspace in the ros2/bags folder
-# 2. Start the ROS Bag recording
-# 3. Allows for naming of file and manual starting/ending of the recording
-
-# To run this script, use the ALL NEW DeltaUI!!!!!
-
-cd ~/ros2/bags
 source /opt/ros/humble/setup.bash
-source ~/ros2/install/setup.bash #might not be needed
+source ~/ros2/install/setup.bash
+source ~/hesai_ws/install/setup.bash
+mkdir -p ~/bags
+cd ~/bags
 
-BAG_NUM=$1
-
-ros2 bag record -o "test_hesai_$BAG_NUM" /lidar_points /lidar_packets &
+exec ros2 bag record -s sqlite3 -o "test_hesai_$BAG_NUM" \
+  /qbot_imu \
+  /lidar_points \
+  /lidar_packets \
+  /lidar_ptp \
+  /lidar_corrections \
+  /lidar_packets_loss \
+  /qbot_speed_feedback \
+  /qbot_joint \
+  /tf \
+  /tf_static

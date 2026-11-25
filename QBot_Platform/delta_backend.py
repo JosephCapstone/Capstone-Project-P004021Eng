@@ -36,6 +36,7 @@ HESAI_DRIVER_PATTERN = (
     "hesai_ros_driver_node([[:space:]]|$)"
 )
 HESAI_LAUNCH_PATTERN = r"[r]os2 launch hesai_ros_driver start\.py([[:space:]]|$)"
+QBOT_LAUNCH_PATTERN = r"[r]os2 launch qbot_platform qbot_platform_manual_drive_launch\.py([[:space:]]|$)"
 
 
 def select_jetson_host(timeout: float = 0.75) -> str:
@@ -192,8 +193,11 @@ class ParamikoJetsonClient:
             ssh.close()
 
     def probe(self, recording_name: Optional[str]) -> dict[str, Any]:
+        qbot_pattern = self.config.jetson_run_pattern
+        if self.config.lidar_type == "hesai":
+            qbot_pattern = f"({qbot_pattern}|{QBOT_LAUNCH_PATTERN})"
         lines = [
-            f"pgrep -f {shlex.quote(self.config.jetson_run_pattern)} "
+            f"pgrep -f {shlex.quote(qbot_pattern)} "
             ">/dev/null && echo qbot=1 || echo qbot=0",
             "pgrep -f '[r]os2 bag record' >/dev/null && echo recording=1 || echo recording=0",
         ]
@@ -206,10 +210,11 @@ class ParamikoJetsonClient:
             data_probe = (
                 "source /opt/ros/humble/setup.bash && "
                 "source ~/ros2/install/setup.bash && "
+                "source ~/hesai_ws/install/setup.bash && "
                 f"export ROS_DOMAIN_ID={self.config.ros_domain_id} ROS_LOCALHOST_ONLY=0 && "
-                "(timeout 3s ros2 topic echo /lidar_points sensor_msgs/msg/PointCloud2 "
+                "(timeout 5s ros2 topic echo /lidar_points sensor_msgs/msg/PointCloud2 "
                 "--no-daemon --once --field header --qos-reliability best_effort "
-                "|| timeout 3s ros2 topic echo /lidar_packets hesai_ros_driver/msg/UdpFrame "
+                "|| timeout 5s ros2 topic echo /lidar_packets hesai_ros_driver/msg/UdpFrame "
                 "--no-daemon --once --no-arr --qos-reliability best_effort)"
             )
             lines.append(
@@ -219,7 +224,8 @@ class ParamikoJetsonClient:
             )
         if recording_name:
             prefix = "test_hesai_" if self.config.lidar_type == "hesai" else "test_"
-            bag_directory = f'"$HOME/ros2/bags/{prefix}{recording_name}"'
+            bag_root = "bags" if self.config.lidar_type == "hesai" else "ros2/bags"
+            bag_directory = f'"$HOME/{bag_root}/{prefix}{recording_name}"'
             lines.append(
                 f"test -d {bag_directory} && du -sb {bag_directory} "
                 "| awk '{print \"recording_bytes=\"$1}' || "
@@ -514,7 +520,10 @@ class DeltaBackend:
                 self._record_event(f"Jetson is unavailable: {error}", "error")
             return
 
-        process_running = bool(probe.get("qbot", 0))
+        qbot_running = bool(probe.get("qbot", 0))
+        process_running = qbot_running or (
+            self.config.lidar_type == "hesai" and bool(probe.get("hesai_driver", 0))
+        )
         recorder_running = bool(probe.get("recording", 0))
         recording_bytes = int(probe.get("recording_bytes", 0))
         now = time.monotonic()
@@ -543,7 +552,7 @@ class DeltaBackend:
                     qbot_state = "stopping"
                 else:
                     qbot_state = "degraded"
-            elif process_running and not stale_topics:
+            elif qbot_running and not stale_topics:
                 qbot_state = "running"
             elif process_running and now - self._qbot_requested_at < 90.0:
                 qbot_state = "starting"
@@ -624,7 +633,7 @@ class DeltaBackend:
         command = f"pkill -INT -f {shlex.quote(self.config.jetson_run_pattern)} || true"
         if self.config.lidar_type == "hesai":
             pattern = shlex.quote(
-                f"({self.config.jetson_run_pattern}|{HESAI_LAUNCH_PATTERN}|{HESAI_DRIVER_PATTERN})"
+                f"({self.config.jetson_run_pattern}|{QBOT_LAUNCH_PATTERN}|{HESAI_LAUNCH_PATTERN}|{HESAI_DRIVER_PATTERN})"
             )
             command = (
                 "for stop_signal in INT TERM KILL; do "
